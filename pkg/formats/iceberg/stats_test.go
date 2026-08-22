@@ -342,6 +342,39 @@ func TestIceberg_DecodeBoundRejectsMalformedInput(t *testing.T) {
 	}
 }
 
+// TestIceberg_EncodeBoundProducesNonNilEmptyForAnEmptyValue closes the other direction of T70 defect
+// 5: EncodeBound("") must itself produce a non-nil, zero-length []byte, not a nil one — otherwise the
+// exact-inverse claim (encode then decode reproduces the original value) would not hold for the
+// empty value in the first place, regardless of what DecodeBound does with it.
+func TestIceberg_EncodeBoundProducesNonNilEmptyForAnEmptyValue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		schema *model.Schema
+		value  any
+	}{
+		{name: "empty string", schema: model.NewPrimitiveSchema(model.TypeString, true), value: ""},
+		{name: "empty bytes", schema: model.NewPrimitiveSchema(model.TypeBytes, true), value: []byte{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			encoded, ok := iceberg.EncodeBound(tt.schema, tt.value, iceberg.LowerBound)
+			require.True(t, ok)
+			require.NotNil(t, encoded, "EncodeBound produced a nil []byte for an empty value, "+
+				"indistinguishable from omitting the bound entirely")
+			assert.Empty(t, encoded)
+
+			decoded, ok := iceberg.DecodeBound(tt.schema, encoded)
+			require.True(t, ok)
+			assert.Equal(t, tt.value, decoded)
+		})
+	}
+}
+
 // TestIceberg_DecodeBoundDistinguishesMissingFromEmpty pins T70 defect 5: a nil []byte ("this field
 // id is not in the manifest's bounds map at all") and a non-nil, zero-length []byte ("the writer
 // recorded an empty string or empty binary minimum") used to collapse to the same "no bound"

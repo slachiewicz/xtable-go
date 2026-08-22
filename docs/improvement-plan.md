@@ -4139,8 +4139,11 @@ above `last-column-id`; a dropped and re-added column does not silently inherit 
 Found by `test/torture_types_test.go` on 2026-08-22, whose fixtures put values on the boundaries
 where translation breaks rather than in the middle where it does not. Five of these were originally
 pinned by skipped tests rather than asserted as correct behaviour; defect 3's two skips were removed
-2026-08-22 once it was fixed. The remaining three skips are defect 1's two and the one half of
-defect 4 that stays blocked on defect 1 (see below).
+2026-08-22 once it was fixed. The remaining three skips are one for defect 1
+(`per_column_bounds_once_stats_parsing_is_fixed` — its other test,
+`stats_blob_dropped_by_nested_struct_null_count`, demonstrates the defect directly and passes), one
+for defect 2 (`null_distinct_from_empty_string`), and one for the write-side half of defect 4
+(`decimal_bound_dropped_on_write`, blocked on defect 1 — see below).
 
 **1. A struct column silently discards the entire statistics blob.** The headline defect.
 `StatsJSON.NullCount` is `map[string]int64` (`pkg/formats/delta`), but delta-rs legitimately nests a
