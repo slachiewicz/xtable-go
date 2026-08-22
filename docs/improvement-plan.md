@@ -4024,7 +4024,7 @@ already correct, so the table reads as a record rather than only covering the fi
 
 ---
 
-## T68 — Iceberg incremental sync drops every previously live file
+## T68 — Iceberg incremental sync drops every previously live file ✅ COMPLETED
 
 **The most serious defect found on 2026-08-22, and it is silent data loss on the main incremental
 path.**
@@ -4063,6 +4063,43 @@ commit silently starts from version 0. T65 noted the same swallow from the other
 values match the source, verified by DuckDB rather than by polytable; a removal in `FilesRemoved`
 disappears from the target; and the existing single-commit fixtures still pass.
 
+**Fixed** in `pkg/formats/iceberg/target.go`. `CommitChanges` now reads the target's own current
+live file set back via `Source.GetCurrentSnapshot` before each commit (`previousLiveFiles`), applies
+that change's `FilesDiff` (`applyFilesDiff`: removals first, by `PhysicalPath`, then appends
+`FilesAdded`, so a rewrite in place — the same path in both lists — ends up live exactly once with
+the new metadata) and hands `CommitSnapshot` the resulting full set. `CommitSnapshot`'s own contract
+— replace the live set outright with whatever `DataFiles` it is given — is unchanged, since
+`incremental_test.go`'s `commitThreeSnapshots` and the single-commit fixtures both depend on it.
+
+**A second defect surfaced while wiring this up and is fixed alongside it**: `CommitSnapshot`
+derives `SnapshotID` from `time.Now().UnixMilli()`, and `CommitChanges` now commits several snapshots
+back-to-back for one incoming batch (the T40 interaction this task called out) — two commits inside
+the same millisecond collided on the same snapshot id, and `GetCurrentSnapshot`'s id lookup silently
+resolved to the wrong (typically older) one, reintroducing the row loss this task exists to fix.
+`CommitSnapshot` now bumps `snapshotID` past the highest id already recorded in `prevMeta.Snapshots`
+when the clock does not separate them, so an incremental sync that lands several commits inside one
+call is no longer clock-resolution-dependent for correctness. `TimestampMs` still reports the wall
+clock; only the id is adjusted.
+
+**The swallowed error is fixed, and both instances of it, not just the one named above.**
+`CommitSnapshot` discarded the error from *both* `listMetadataFiles` and `readMetadata`; either one
+failing was indistinguishable from "no table exists yet" and would have silently restarted version
+numbering at 1 next to a metadata file the commit could not read — the exact T65 interaction this
+task named (a v3-labelled table now fails a v2 writer's `readMetadata` outright). Both are now
+propagated and abort the commit; a genuinely absent table is unaffected, since `listMetadataFiles`
+reports that case as `(nil, nil, nil)`, not an error.
+
+**Tests**: `pkg/formats/iceberg/carry_forward_test.go` adds five cases — multi-commit accumulation
+with a metadata-only middle commit, a removal actually removing, a same-path rewrite ending up live
+once with the new size, a single-commit sync staying unchanged, and an unreadable previous metadata
+file aborting the commit rather than restarting at version 1 (confirmed by asserting no new
+`v1.metadata.json` is written). `TestSchemaEvolution_AddColumn` in `test/schema_evolution_test.go`
+now passes **without modification** — confirmed both ways, by reverting `target.go` alone and
+re-running it red again. `go test -count=1 ./test/ -run Equivalence` (DuckDB reading polytable's
+Iceberg output) passes. The only failure left in `go test -count=1 ./test/` is
+`TestSchemaEvolution_ReorderColumns`, reproduced identically before this change (`schema.go`'s
+positional field-id assignment, T69, explicitly out of this task's file scope).
+
 **Commit:** `fix: carry forward live files across an Iceberg incremental commit`
 
 ---
@@ -4094,6 +4131,59 @@ what `last-column-id` in the metadata exists to support.
 above `last-column-id`; a dropped and re-added column does not silently inherit the old id.
 
 **Commit:** `fix: keep Iceberg field ids stable across schema changes`
+
+---
+
+## T70 — Seven type-translation defects, six of them silent
+
+Found by `test/torture_types_test.go` on 2026-08-22, whose fixtures put values on the boundaries
+where translation breaks rather than in the middle where it does not. Five of these are pinned by
+skipped tests rather than asserted as correct behaviour.
+
+**1. A struct column silently discards the entire statistics blob.** The headline defect.
+`StatsJSON.NullCount` is `map[string]int64` (`pkg/formats/delta`), but delta-rs legitimately nests a
+struct column's null count as a JSON *object*. `json.Unmarshal` fails, and `convertAddAction`'s
+`if err == nil` then drops **all** stats — `RecordCount` and every column's bounds, not just the
+struct's — with nothing surfaced. Any Delta table containing a struct loses its record counts.
+
+**2. A null partition value is indistinguishable from an empty one.**
+`AddAction.PartitionValues` is `map[string]string`, so JSON `null` and `""` both decode to `""`.
+This is upstream's #828 family. Iceberg's Avro-decoded partition record does not have the problem.
+
+**3. `fixed[N]` narrows to string silently.** `parseIcebergType` has no case for it, and the
+mistake cascades: `DecodeBound` then decodes the bound as a Go string rather than `[]byte`.
+
+**4. Decimal bounds are dropped on read and write.** `EncodeBound`/`DecodeBound` have no `DECIMAL`
+case — the code comment already said so. Nothing is surfaced in the sync result.
+
+**5. An empty bound is indistinguishable from a missing one.** `DecodeBound` returns early on
+`len(raw) == 0`, so a genuinely empty string or bytes minimum is lost.
+
+**6. Hudi's writer and its own reader disagree.** The writer emits the Avro logical type
+`local-timestamp-micros` for `TIMESTAMP_NTZ`; its reader has no case for it and narrows to `STRING`.
+A self-inconsistent round trip, which is the one class a self-test *should* have caught.
+
+**7. Paimon narrows structures and zone-awareness.** `modelTypeToPaimonType` has no `TypeRecord`
+case; `parsePaimonType` cannot parse `ARRAY<` or `MAP<`, so it narrows on read even where the write
+was right; and `TIMESTAMP` and `TIMESTAMP_NTZ` both collapse to `TIMESTAMP(6)`.
+
+**Not defects, recorded so they are not re-investigated.** Iceberg `UUID` → Delta `STRING` is an
+explicit, defensible mapping rather than the default fallback. The Parquet schema reader *correctly*
+errors by name on LIST/MAP-shaped nesting rather than narrowing.
+
+**Writer limitations polytable cannot recover**, observed and recorded in the fixture manifests:
+delta-rs clamps `decimal(38,0)` stats to int64 range and collapses `decimal(38,37)` to a lossy
+float; it computes no stats at all for binary, list or map columns; pyiceberg 0.11.1 cannot write
+format-version 3, so nanosecond timestamps are untestable with it; delta-rs accepts `timestamp[ns]`
+and silently truncates to microseconds.
+
+**Order to fix.** (1) first — it is silent loss of record counts on an ordinary schema. Then (6),
+because a format disagreeing with itself needs no foreign reader to be wrong. Then (2), which has an
+upstream issue to match against. (3), (4) and (5) are narrower and share the `DecodeBound` seam, so
+they are one change.
+
+**Acceptance:** each skipped test in `test/torture_types_test.go` is unskipped and passes, or is
+recorded here as a genuine format limitation with the reason.
 
 ---
 
