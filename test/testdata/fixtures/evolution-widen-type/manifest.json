@@ -1,0 +1,95 @@
+{
+  "commit_count": 2,
+  "commits": [
+    {
+      "added": [
+        "part-00000-37d3f4b5-f163-427d-8fdd-0d026c4cc3ad-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [],
+      "schema_columns": [
+        "id",
+        "region",
+        "quantity",
+        "price"
+      ],
+      "timestamp": 1787426721286,
+      "version": 0
+    },
+    {
+      "added": [
+        "part-00000-96efc0aa-4612-4c8e-a5a2-7ba664e8d2b3-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [
+        "part-00000-37d3f4b5-f163-427d-8fdd-0d026c4cc3ad-c000.snappy.parquet"
+      ],
+      "schema_columns": [
+        "id",
+        "region",
+        "quantity",
+        "price"
+      ],
+      "timestamp": 1787426721288,
+      "version": 1
+    }
+  ],
+  "data_file_count": 1,
+  "data_files": [
+    {
+      "partition_values": {},
+      "path": "part-00000-96efc0aa-4612-4c8e-a5a2-7ba664e8d2b3-c000.snappy.parquet",
+      "record_count": 2,
+      "size_bytes": 1403
+    }
+  ],
+  "format": "DELTA",
+  "notes": [
+    "Written by delta-rs; polytable has never touched this directory.",
+    "TableFeatures has no TypeWidening member in deltalake==1.6.3's Python binding, and",
+    "schema_mode=merge refuses to cast the wider commit's values down to the narrower",
+    "column, so this is a schema_mode=overwrite rewrite rather than the native Delta",
+    "type-widening feature. 'quantity' and 'price' keep their schema position across the",
+    "widen; only their type changes."
+  ],
+  "schema": [
+    {
+      "name": "id",
+      "nullable": false,
+      "type": "LONG"
+    },
+    {
+      "name": "region",
+      "nullable": false,
+      "type": "STRING"
+    },
+    {
+      "name": "quantity",
+      "nullable": true,
+      "type": "LONG"
+    },
+    {
+      "name": "price",
+      "nullable": true,
+      "type": "DECIMAL(10,4)"
+    }
+  ],
+  "table_dir": "invoices",
+  "table_name": "invoices",
+  "total_rows": 2,
+  "widen_commit": "1",
+  "widened_columns": {
+    "price": {
+      "after": "DECIMAL(10,4)",
+      "before": "DECIMAL(10,2)"
+    },
+    "quantity": {
+      "after": "LONG",
+      "before": "INT"
+    }
+  },
+  "writer": {
+    "library": "deltalake",
+    "version": "1.6.3"
+  }
+}

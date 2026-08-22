@@ -1,0 +1,99 @@
+{
+  "added_column": "label",
+  "commit_count": 3,
+  "commits": [
+    {
+      "added": [
+        "part-00000-ca6c476a-0c74-4a80-828f-d88c91192999-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [],
+      "schema_columns": [
+        "id",
+        "region"
+      ],
+      "timestamp": 1787426721224,
+      "version": 0
+    },
+    {
+      "added": [],
+      "operation": "ADD COLUMN",
+      "removed": [],
+      "schema_columns": [
+        "id",
+        "region",
+        "label"
+      ],
+      "timestamp": 1787426721226,
+      "version": 1
+    },
+    {
+      "added": [
+        "part-00000-868b5b03-c219-446f-a4ea-a42afe8b0445-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [],
+      "schema_columns": null,
+      "timestamp": 1787426721228,
+      "version": 2
+    }
+  ],
+  "data_file_count": 2,
+  "data_files": [
+    {
+      "partition_values": {},
+      "path": "part-00000-868b5b03-c219-446f-a4ea-a42afe8b0445-c000.snappy.parquet",
+      "record_count": 2,
+      "size_bytes": 990
+    },
+    {
+      "partition_values": {},
+      "path": "part-00000-ca6c476a-0c74-4a80-828f-d88c91192999-c000.snappy.parquet",
+      "record_count": 2,
+      "size_bytes": 741
+    }
+  ],
+  "format": "DELTA",
+  "notes": [
+    "Written by delta-rs; polytable has never touched this directory.",
+    "Every row written after 'label' was added still leaves it null: schema_mode=merge pads",
+    "missing columns rather than requiring the writer to set them.",
+    "null_files and table_null_count were cross-checked against deltalake's own",
+    "get_add_actions() statistics and to_pyarrow_table() read, independently of each other."
+  ],
+  "null_files": [
+    {
+      "null_count": 2,
+      "path": "part-00000-868b5b03-c219-446f-a4ea-a42afe8b0445-c000.snappy.parquet",
+      "record_count": 2
+    }
+  ],
+  "null_populated_commit": "2",
+  "schema": [
+    {
+      "name": "id",
+      "nullable": false,
+      "type": "LONG"
+    },
+    {
+      "name": "region",
+      "nullable": false,
+      "type": "STRING"
+    },
+    {
+      "name": "label",
+      "nullable": true,
+      "type": "STRING"
+    }
+  ],
+  "schema_change_commit": "1",
+  "table_dir": "events",
+  "table_name": "events",
+  "table_null_count": 4,
+  "table_total_rows": 4,
+  "total_rows": 4,
+  "writer": {
+    "library": "deltalake",
+    "version": "1.6.3"
+  }
+}

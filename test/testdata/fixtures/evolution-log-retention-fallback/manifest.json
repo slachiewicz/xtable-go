@@ -1,0 +1,66 @@
+{
+  "commit_count": 4,
+  "data_file_count": 4,
+  "data_files": [
+    {
+      "partition_values": {},
+      "path": "part-00000-66b8304a-8de0-4acf-b2f5-40419c1cbe98-c000.snappy.parquet",
+      "record_count": 2,
+      "size_bytes": 812
+    },
+    {
+      "partition_values": {},
+      "path": "part-00000-a75b9282-6829-419e-8ff1-e86919f811ea-c000.snappy.parquet",
+      "record_count": 2,
+      "size_bytes": 812
+    },
+    {
+      "partition_values": {},
+      "path": "part-00000-a9d65a58-6238-4fc2-85ee-0ea3bfbc3f2d-c000.snappy.parquet",
+      "record_count": 2,
+      "size_bytes": 812
+    },
+    {
+      "partition_values": {},
+      "path": "part-00000-fed6c6eb-0d65-40a7-ac0f-a1633d21740c-c000.snappy.parquet",
+      "record_count": 2,
+      "size_bytes": 812
+    }
+  ],
+  "erased_commit_timestamp_ms": 1787426721340,
+  "first_surviving_version": 2,
+  "format": "DELTA",
+  "log_files": [
+    "00000000000000000002.checkpoint.parquet",
+    "00000000000000000002.json",
+    "00000000000000000003.json",
+    "_last_checkpoint"
+  ],
+  "notes": [
+    "Written by delta-rs; polytable has never touched this directory.",
+    "erased_commit_timestamp_ms is version 0's real commitInfo.timestamp, read before",
+    "cleanup_metadata() deleted its JSON commit. IsIncrementalSyncSafeFrom must report",
+    "true from retained_first_commit_timestamp_ms and false from an instant at or before",
+    "erased_commit_timestamp_ms, since that commit's JSON no longer exists to verify against."
+  ],
+  "retained_first_commit_timestamp_ms": 1787426721345,
+  "schema": [
+    {
+      "name": "id",
+      "nullable": false,
+      "type": "LONG"
+    },
+    {
+      "name": "amount",
+      "nullable": true,
+      "type": "DOUBLE"
+    }
+  ],
+  "table_dir": "metrics",
+  "table_name": "metrics",
+  "total_rows": 8,
+  "writer": {
+    "library": "deltalake",
+    "version": "1.6.3"
+  }
+}

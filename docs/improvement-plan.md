@@ -4024,6 +4024,79 @@ already correct, so the table reads as a record rather than only covering the fi
 
 ---
 
+## T68 — Iceberg incremental sync drops every previously live file
+
+**The most serious defect found on 2026-08-22, and it is silent data loss on the main incremental
+path.**
+
+`Target.CommitChanges` (`pkg/formats/iceberg/target.go:342`) builds a snapshot from
+`change.FilesDiff.FilesAdded` alone and hands it to `CommitSnapshot`, which writes a manifest
+containing exactly those files. **The previous snapshot's still-live files are never carried
+forward.** `FilesRemoved` is not consulted at all.
+
+So after an incremental sync, the Iceberg table contains only the files added by the last commit.
+Every row written by any earlier commit is gone from the table's view of itself. The sync reports
+success.
+
+**Demonstrated**: `TestSchemaEvolution_AddColumn` loses 2 of 4 rows across a two-commit incremental
+boundary — a metadata-only schema change followed by a partial append.
+
+**Why nothing caught it.** Every fixture in this repository until now was a single whole-table
+rewrite, where the added files happen to be *all* the live files, so the bug is invisible by
+coincidence rather than absent. The drop, widen and rename fixtures pass for exactly that reason and
+prove nothing about this path.
+
+**The fix is not to append to the previous manifest.** The new live set is the previous live set,
+minus `FilesRemoved`, plus `FilesAdded` — which means the target must read its own previous snapshot
+to know what was live, since `model.TableChange` carries a diff and not a full file list. That is
+what an Iceberg writer does anyway, and `CommitSnapshot` already reads `prevMeta`.
+
+**Watch for the interaction with T40.** The Iceberg *source* now walks snapshot history and emits one
+change per snapshot; this is the *target* failing to accumulate them. A fix here should be checked
+against a multi-commit source, not a single change.
+
+**Also fix the swallowed error while here**: `CommitSnapshot` discards `readMetadata`'s error
+(`prevMeta, _ = ...`), so a table it cannot read is treated as a table that does not exist and the
+commit silently starts from version 0. T65 noted the same swallow from the other side.
+
+**Acceptance:** a multi-commit incremental sync to Iceberg produces a table whose row count and
+values match the source, verified by DuckDB rather than by polytable; a removal in `FilesRemoved`
+disappears from the target; and the existing single-commit fixtures still pass.
+
+**Commit:** `fix: carry forward live files across an Iceberg incremental commit`
+
+---
+
+## T69 — Iceberg field ids are assigned by position
+
+`SchemaToIceberg` (`pkg/formats/iceberg/schema.go`) assigns `fieldID := nextID`, incrementing per
+loop iteration, unless the source field already carries a positive `FieldID` — which a Delta source
+never does, because Delta field identity here comes from the name rather than the column-mapping id
+(T57).
+
+So a **pure column reorder changes every field's Iceberg id**. Demonstrated by
+`TestSchemaEvolution_ReorderColumns`: `id`, `region` and `amount` all take different ids across a
+reorder that changed no data.
+
+Field ids are the one thing an Iceberg consumer is entitled to rely on. A reader that maps by id —
+which is the whole point of ids — silently reads the wrong column under the right name. **That is
+worse than a hard failure**, because nothing surfaces: the query succeeds and the values are wrong.
+
+**Related but distinct from T57.** T57 is about Delta field *identity* on the source side. This is
+about *assignment* on the Iceberg target side, and it would still be wrong even if T57 were fixed,
+for any source that does not supply ids.
+
+**The fix needs a stable mapping**, most likely reading the previous Iceberg schema and reusing the
+id already assigned to each field name, allocating new ids only for genuinely new fields — which is
+what `last-column-id` in the metadata exists to support.
+
+**Acceptance:** a reorder leaves every existing field's id unchanged; a new column gets a fresh id
+above `last-column-id`; a dropped and re-added column does not silently inherit the old id.
+
+**Commit:** `fix: keep Iceberg field ids stable across schema changes`
+
+---
+
 ## Non-goals
 
 - **Renaming stuttering identifiers** (`delta.DeltaCommit` → `Commit`, `catalog.CatalogType` → `Type`).

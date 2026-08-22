@@ -1,0 +1,112 @@
+{
+  "commit_count": 6,
+  "commits": [
+    {
+      "added": [
+        "part-00000-64e16b82-e87b-456a-9e91-cac082f9a314-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [],
+      "schema_columns": [
+        "id",
+        "amount"
+      ],
+      "timestamp": 1787426721298,
+      "version": 0
+    },
+    {
+      "added": [
+        "part-00000-7a448d98-7a69-4172-87ea-c06c560bea78-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [],
+      "schema_columns": null,
+      "timestamp": 1787426721300,
+      "version": 1
+    },
+    {
+      "added": [
+        "part-00000-955e9356-366a-4055-909d-cda243dc5ab0-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [],
+      "schema_columns": null,
+      "timestamp": 1787426721303,
+      "version": 2
+    },
+    {
+      "added": [
+        "part-00000-7cf93526-cfb7-40f5-a0fb-469d2482a6b6-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [],
+      "schema_columns": null,
+      "timestamp": 1787426721306,
+      "version": 3
+    },
+    {
+      "added": [
+        "part-00000-be09c432-52b7-4669-a9d8-69e69f81a5eb-c000.zstd.parquet"
+      ],
+      "operation": "DELETE",
+      "removed": [
+        "part-00000-7a448d98-7a69-4172-87ea-c06c560bea78-c000.snappy.parquet"
+      ],
+      "schema_columns": null,
+      "timestamp": 1787426721310,
+      "version": 4
+    },
+    {
+      "added": [
+        "part-00000-ace00c3e-5a6d-4585-83d6-dacdccc6ff61-c000.zstd.parquet"
+      ],
+      "operation": "OPTIMIZE",
+      "removed": [
+        "part-00000-64e16b82-e87b-456a-9e91-cac082f9a314-c000.snappy.parquet",
+        "part-00000-7cf93526-cfb7-40f5-a0fb-469d2482a6b6-c000.snappy.parquet",
+        "part-00000-955e9356-366a-4055-909d-cda243dc5ab0-c000.snappy.parquet",
+        "part-00000-be09c432-52b7-4669-a9d8-69e69f81a5eb-c000.zstd.parquet"
+      ],
+      "schema_columns": null,
+      "timestamp": 1787426721314,
+      "version": 5
+    }
+  ],
+  "compaction_commit": "5",
+  "data_file_count": 1,
+  "data_files": [
+    {
+      "partition_values": {},
+      "path": "part-00000-ace00c3e-5a6d-4585-83d6-dacdccc6ff61-c000.zstd.parquet",
+      "record_count": 7,
+      "size_bytes": 874
+    }
+  ],
+  "delete_commit": "4",
+  "format": "DELTA",
+  "notes": [
+    "Written by delta-rs; polytable has never touched this directory.",
+    "Commit 4 deletes id=3, rewriting its 2-row file to 1 row.",
+    "Commit 5 then compacts every surviving file into one, with",
+    "no row added, changed or removed -- the row total must stay at 7 through both."
+  ],
+  "schema": [
+    {
+      "name": "id",
+      "nullable": false,
+      "type": "LONG"
+    },
+    {
+      "name": "amount",
+      "nullable": true,
+      "type": "DOUBLE"
+    }
+  ],
+  "table_dir": "clicks",
+  "table_name": "clicks",
+  "total_rows": 7,
+  "writer": {
+    "library": "deltalake",
+    "version": "1.6.3"
+  }
+}

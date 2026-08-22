@@ -1,0 +1,115 @@
+{
+  "commit_count": 5,
+  "commits": [
+    {
+      "added": [
+        "region=east/part-00000-79ae894a-75f1-4ed6-b970-ce8671f305a9-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [],
+      "schema_columns": [
+        "id",
+        "region",
+        "amount"
+      ],
+      "timestamp": 1787426721320,
+      "version": 0
+    },
+    {
+      "added": [
+        "region=west/part-00000-faadf614-5ac6-4be1-a6e2-d033cddc4d62-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [],
+      "schema_columns": null,
+      "timestamp": 1787426721323,
+      "version": 1
+    },
+    {
+      "added": [
+        "region=east/part-00000-37d969a2-8a54-49fc-9033-f9c3b8360dae-c000.zstd.parquet"
+      ],
+      "operation": "DELETE",
+      "removed": [
+        "region=east/part-00000-79ae894a-75f1-4ed6-b970-ce8671f305a9-c000.snappy.parquet"
+      ],
+      "schema_columns": null,
+      "timestamp": 1787426721327,
+      "version": 2
+    },
+    {
+      "added": [
+        "region=east/part-00000-dac92587-1eae-4f90-b582-4b29c89b7c29-c000.zstd.parquet"
+      ],
+      "operation": "DELETE",
+      "removed": [
+        "region=east/part-00000-37d969a2-8a54-49fc-9033-f9c3b8360dae-c000.zstd.parquet"
+      ],
+      "schema_columns": null,
+      "timestamp": 1787426721331,
+      "version": 3
+    },
+    {
+      "added": [],
+      "operation": "DELETE",
+      "removed": [
+        "region=east/part-00000-dac92587-1eae-4f90-b582-4b29c89b7c29-c000.zstd.parquet"
+      ],
+      "schema_columns": null,
+      "timestamp": 1787426721335,
+      "version": 4
+    }
+  ],
+  "data_file_count": 1,
+  "data_files": [
+    {
+      "partition_values": {
+        "region": "west"
+      },
+      "path": "region=west/part-00000-faadf614-5ac6-4be1-a6e2-d033cddc4d62-c000.snappy.parquet",
+      "record_count": 2,
+      "size_bytes": 812
+    }
+  ],
+  "drain_commits": [
+    "2",
+    "3",
+    "4"
+  ],
+  "drained_partition": "east",
+  "final_removal_commit": "4",
+  "format": "DELTA",
+  "notes": [
+    "Written by delta-rs; polytable has never touched this directory.",
+    "The 'east' partition's three rows are deleted one at a time: the first two deletes",
+    "each rewrite the file (remove old, add narrower replacement); the third removes the",
+    "file outright with no replacement, since nothing is left to keep."
+  ],
+  "partition_columns": [
+    "region"
+  ],
+  "schema": [
+    {
+      "name": "id",
+      "nullable": false,
+      "type": "LONG"
+    },
+    {
+      "name": "region",
+      "nullable": false,
+      "type": "STRING"
+    },
+    {
+      "name": "amount",
+      "nullable": true,
+      "type": "DOUBLE"
+    }
+  ],
+  "table_dir": "sessions",
+  "table_name": "sessions",
+  "total_rows": 2,
+  "writer": {
+    "library": "deltalake",
+    "version": "1.6.3"
+  }
+}

@@ -1,0 +1,97 @@
+{
+  "added_column": "tax",
+  "columns_after": [
+    "region",
+    "amount",
+    "id",
+    "tax"
+  ],
+  "columns_before": [
+    "id",
+    "region",
+    "amount"
+  ],
+  "commit_count": 2,
+  "commits": [
+    {
+      "added": [
+        "part-00000-02f2d248-3f40-45db-a370-20881a250a64-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [],
+      "schema_columns": [
+        "id",
+        "region",
+        "amount"
+      ],
+      "timestamp": 1787426721292,
+      "version": 0
+    },
+    {
+      "added": [
+        "part-00000-38d0485a-b0a8-4ea4-9444-1dc582b11ac4-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [
+        "part-00000-02f2d248-3f40-45db-a370-20881a250a64-c000.snappy.parquet"
+      ],
+      "schema_columns": [
+        "region",
+        "amount",
+        "id",
+        "tax"
+      ],
+      "timestamp": 1787426721294,
+      "version": 1
+    }
+  ],
+  "data_file_count": 1,
+  "data_files": [
+    {
+      "partition_values": {},
+      "path": "part-00000-38d0485a-b0a8-4ea4-9444-1dc582b11ac4-c000.snappy.parquet",
+      "record_count": 2,
+      "size_bytes": 1381
+    }
+  ],
+  "format": "DELTA",
+  "notes": [
+    "Written by delta-rs; polytable has never touched this directory.",
+    "Commit 1 keeps every original column's name and type and only changes their position,",
+    "while also adding a new trailing column ('tax'). The addition is load-bearing: a pure",
+    "reorder with no set change writes no metaData action at all in deltalake==1.6.3, so",
+    "table.schema() would keep reporting the original field order forever even though the",
+    "rewritten Parquet file is physically laid out in the new order. Adding a column forces",
+    "delta-rs to decide the schema changed and to write the reordered metaData."
+  ],
+  "reorder_commit": "1",
+  "schema": [
+    {
+      "name": "region",
+      "nullable": false,
+      "type": "STRING"
+    },
+    {
+      "name": "amount",
+      "nullable": true,
+      "type": "DOUBLE"
+    },
+    {
+      "name": "id",
+      "nullable": false,
+      "type": "LONG"
+    },
+    {
+      "name": "tax",
+      "nullable": true,
+      "type": "DOUBLE"
+    }
+  ],
+  "table_dir": "shipments",
+  "table_name": "shipments",
+  "total_rows": 2,
+  "writer": {
+    "library": "deltalake",
+    "version": "1.6.3"
+  }
+}

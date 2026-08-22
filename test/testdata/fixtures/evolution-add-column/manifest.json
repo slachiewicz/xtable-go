@@ -1,0 +1,95 @@
+{
+  "added_column": "bonus",
+  "commit_count": 3,
+  "commits": [
+    {
+      "added": [
+        "part-00000-4a8b92af-5bf9-44e2-aba3-11c245175bff-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [],
+      "schema_columns": [
+        "id",
+        "region",
+        "amount"
+      ],
+      "timestamp": 1787426721213,
+      "version": 0
+    },
+    {
+      "added": [],
+      "operation": "ADD COLUMN",
+      "removed": [],
+      "schema_columns": [
+        "id",
+        "region",
+        "amount",
+        "bonus"
+      ],
+      "timestamp": 1787426721215,
+      "version": 1
+    },
+    {
+      "added": [
+        "part-00000-1d95d20f-6aab-4862-aef5-c78eed4a49f6-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [],
+      "schema_columns": null,
+      "timestamp": 1787426721220,
+      "version": 2
+    }
+  ],
+  "data_file_count": 2,
+  "data_files": [
+    {
+      "partition_values": {},
+      "path": "part-00000-1d95d20f-6aab-4862-aef5-c78eed4a49f6-c000.snappy.parquet",
+      "record_count": 2,
+      "size_bytes": 1389
+    },
+    {
+      "partition_values": {},
+      "path": "part-00000-4a8b92af-5bf9-44e2-aba3-11c245175bff-c000.snappy.parquet",
+      "record_count": 2,
+      "size_bytes": 1072
+    }
+  ],
+  "format": "DELTA",
+  "notes": [
+    "Written by delta-rs; polytable has never touched this directory.",
+    "Commit 1 is alter.add_columns(): a metadata-only commit that adds and removes no files.",
+    "Commit 2 is the first commit whose files actually carry a value for 'bonus'."
+  ],
+  "populated_commit": "2",
+  "schema": [
+    {
+      "name": "id",
+      "nullable": false,
+      "type": "LONG"
+    },
+    {
+      "name": "region",
+      "nullable": false,
+      "type": "STRING"
+    },
+    {
+      "name": "amount",
+      "nullable": true,
+      "type": "DOUBLE"
+    },
+    {
+      "name": "bonus",
+      "nullable": true,
+      "type": "DOUBLE"
+    }
+  ],
+  "schema_change_commit": "1",
+  "table_dir": "accounts",
+  "table_name": "accounts",
+  "total_rows": 4,
+  "writer": {
+    "library": "deltalake",
+    "version": "1.6.3"
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "columns_after": [
+    "id",
+    "region"
+  ],
+  "columns_before": [
+    "id",
+    "region",
+    "amount"
+  ],
+  "commit_count": 2,
+  "commits": [
+    {
+      "added": [
+        "part-00000-704a1e90-8525-4c74-a624-cb321325ce1b-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [],
+      "schema_columns": [
+        "id",
+        "region",
+        "amount"
+      ],
+      "timestamp": 1787426721274,
+      "version": 0
+    },
+    {
+      "added": [
+        "part-00000-f0b477e2-009e-4947-9a99-ddd3b512635a-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [
+        "part-00000-704a1e90-8525-4c74-a624-cb321325ce1b-c000.snappy.parquet"
+      ],
+      "schema_columns": [
+        "id",
+        "region"
+      ],
+      "timestamp": 1787426721276,
+      "version": 1
+    }
+  ],
+  "data_file_count": 1,
+  "data_files": [
+    {
+      "partition_values": {},
+      "path": "part-00000-f0b477e2-009e-4947-9a99-ddd3b512635a-c000.snappy.parquet",
+      "record_count": 2,
+      "size_bytes": 741
+    }
+  ],
+  "drop_commit": "1",
+  "dropped_column": "amount",
+  "format": "DELTA",
+  "notes": [
+    "Written by delta-rs; polytable has never touched this directory.",
+    "Commit 1 drops 'amount', the trailing column, via schema_mode=overwrite: a",
+    "whole-table rewrite. deltalake==1.6.3's write_deltalake refuses schema_mode=overwrite",
+    "for a non-trailing drop -- dropping 'id' or 'region' out of the same starting schema",
+    "both fail with 'Schema error: No field named ...' -- so a middle-column drop is not",
+    "reproducible at this writer version; generate_reorder_columns covers position drift",
+    "among surviving columns instead."
+  ],
+  "schema": [
+    {
+      "name": "id",
+      "nullable": false,
+      "type": "LONG"
+    },
+    {
+      "name": "region",
+      "nullable": false,
+      "type": "STRING"
+    }
+  ],
+  "table_dir": "ledger",
+  "table_name": "ledger",
+  "total_rows": 2,
+  "writer": {
+    "library": "deltalake",
+    "version": "1.6.3"
+  }
+}

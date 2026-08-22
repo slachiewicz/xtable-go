@@ -1,0 +1,90 @@
+{
+  "columns_after": [
+    "id",
+    "region",
+    "total"
+  ],
+  "columns_before": [
+    "id",
+    "region",
+    "amount"
+  ],
+  "commit_count": 2,
+  "commits": [
+    {
+      "added": [
+        "part-00000-d4122d4c-94f8-410b-b124-0c2b8f24fcd5-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [],
+      "schema_columns": [
+        "id",
+        "region",
+        "amount"
+      ],
+      "timestamp": 1787426721280,
+      "version": 0
+    },
+    {
+      "added": [
+        "part-00000-de970f1e-7e20-4bc6-95a0-beb841f6191a-c000.snappy.parquet"
+      ],
+      "operation": "WRITE",
+      "removed": [
+        "part-00000-d4122d4c-94f8-410b-b124-0c2b8f24fcd5-c000.snappy.parquet"
+      ],
+      "schema_columns": [
+        "id",
+        "region",
+        "total"
+      ],
+      "timestamp": 1787426721282,
+      "version": 1
+    }
+  ],
+  "data_file_count": 1,
+  "data_files": [
+    {
+      "partition_values": {},
+      "path": "part-00000-de970f1e-7e20-4bc6-95a0-beb841f6191a-c000.snappy.parquet",
+      "record_count": 4,
+      "size_bytes": 1095
+    }
+  ],
+  "format": "DELTA",
+  "new_name": "total",
+  "notes": [
+    "Written by delta-rs; polytable has never touched this directory.",
+    "deltalake==1.6.3 refuses delta.columnMapping.mode entirely ('not supported for write",
+    "operation ... yet') and exposes no rename API, so this is a schema_mode=overwrite",
+    "rewrite: the log's own commit 1 is a plain remove of the old file plus an add of the",
+    "new one, with 'amount' gone from the schema and 'total' new. That is the ground truth",
+    "this fixture exists to check a reader against, not an assumption of what should happen."
+  ],
+  "old_name": "amount",
+  "rename_commit": "1",
+  "schema": [
+    {
+      "name": "id",
+      "nullable": false,
+      "type": "LONG"
+    },
+    {
+      "name": "region",
+      "nullable": false,
+      "type": "STRING"
+    },
+    {
+      "name": "total",
+      "nullable": true,
+      "type": "DOUBLE"
+    }
+  ],
+  "table_dir": "payments",
+  "table_name": "payments",
+  "total_rows": 4,
+  "writer": {
+    "library": "deltalake",
+    "version": "1.6.3"
+  }
+}
