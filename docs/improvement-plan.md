@@ -4100,6 +4100,13 @@ Iceberg output) passes. The only failure left in `go test -count=1 ./test/` is
 `TestSchemaEvolution_ReorderColumns`, reproduced identically before this change (`schema.go`'s
 positional field-id assignment, T69, explicitly out of this task's file scope).
 
+**A second defect surfaced while fixing this, and it is worse than it sounds.** `CommitSnapshot`
+derived `SnapshotID` from `time.Now().UnixMilli()`. Once `CommitChanges` began round-tripping through
+the target after every commit, several commits landed inside one millisecond and **collided on the
+same snapshot id**, resolving to the wrong snapshot on read-back and reintroducing the row loss this
+task exists to fix. It is timing-dependent, so it would have appeared as a flaky test rather than a
+bug. `CommitSnapshot` now allocates an id above the highest already in `prevMeta.Snapshots`.
+
 **Commit:** `fix: carry forward live files across an Iceberg incremental commit`
 
 ---
