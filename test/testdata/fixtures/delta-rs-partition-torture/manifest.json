@@ -1,0 +1,41 @@
+{
+  "data_file_count": 4,
+  "data_files": [
+    {
+      "partition_value": "",
+      "path": "region=/part-00000-f6f44b2b-7561-41b7-acdd-23363091fc5d-c000.snappy.parquet",
+      "record_count": 1
+    },
+    {
+      "partition_value": null,
+      "path": "region=__HIVE_DEFAULT_PARTITION__/part-00000-b0331aeb-6f05-4354-9aaf-58c65bf1fadb-c000.snappy.parquet",
+      "record_count": 1
+    },
+    {
+      "partition_value": "east",
+      "path": "region=east/part-00000-5adc58f7-b101-47f4-88ea-5637cabaadb9-c000.snappy.parquet",
+      "record_count": 1
+    },
+    {
+      "partition_value": "north america/100%",
+      "path": "region=north%2520america%252F100%2525/part-00000-3cdbebf0-40e4-487d-83e8-cd5ba726e9f0-c000.snappy.parquet",
+      "record_count": 1
+    }
+  ],
+  "format": "DELTA",
+  "notes": [
+    "Written by delta-rs; polytable has never touched this directory.",
+    "The null-partition row's data/ directory is literally named __HIVE_DEFAULT_PARTITION__, Delta and Hive's sentinel for a null partition value; the empty-string row's directory is 'region=' (empty). Both directories decode to '' if a reader treats an absent add.partitionValues entry and a JSON null the same way it treats the empty string, which is the #828 defect family this fixture targets.",
+    "The percent-encoded row's physical directory name is double percent-encoded by delta-rs (the literal value 'north america/100%' becomes 'north%2520america%252F100%2525' on disk, i.e. the once-encoded name encoded a second time) \u2014 this fixture records that as an observation, not an assertion: decoding a partition value out of the physical directory name is path-handling code this suite does not own. add.partitionValues.region itself carries the raw, unencoded string, which is what polytable's Delta reader actually parses."
+  ],
+  "partition_columns": [
+    "region"
+  ],
+  "table_dir": "part_torture",
+  "table_name": "part_torture",
+  "total_rows": 4,
+  "writer": {
+    "library": "deltalake",
+    "version": "1.6.3"
+  }
+}

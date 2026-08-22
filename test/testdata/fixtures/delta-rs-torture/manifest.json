@@ -1,0 +1,194 @@
+{
+  "column_bounds": {
+    "dec18_4": {
+      "max": 100000000000000.0,
+      "min": -100000000000000.0
+    },
+    "dec38_0": {
+      "max": 9223372036854775807,
+      "min": -9223372036854775808
+    },
+    "dec38_37": {
+      "max": 9.999999999999998,
+      "min": -9.999999999999996
+    },
+    "dec9_2": {
+      "max": 1234567.89,
+      "min": -1234567.89
+    },
+    "f64": {
+      "max": 1.5,
+      "min": -0.0
+    },
+    "str_col": {
+      "max": "line1\nline2\ttab",
+      "min": ""
+    },
+    "str_nullable": {
+      "max": "x",
+      "min": ""
+    },
+    "ts_ntz": {
+      "max": "2026-01-01 00:00:00.123456",
+      "min": "1969-12-31 23:59:59.999999"
+    },
+    "ts_tz": {
+      "max": "2026-01-01T00:00:00Z",
+      "min": "1969-12-31T23:59:59.999999Z"
+    }
+  },
+  "data_file_count": 1,
+  "format": "DELTA",
+  "notes": [
+    "Written by delta-rs; polytable has never touched this directory.",
+    "dec38_0's min/max in minValues/maxValues are clamped to int64 range (-9223372036854775808..9223372036854775807) even though the actual column values are the 38-nines int128 extremes: delta-rs's own JSON stats serialization loses precision here, before polytable ever reads the file. This is a writer-side limitation of the format's JSON stats representation, not something a reader can recover.",
+    "dec38_37's min/max are JSON floating-point numbers, so the scale that makes this a decimal(38,37) column rather than a decimal(38,0) one is not preserved in the stats either \u2014 9.999...9 (37 nines) round-trips through delta-rs's stats as 9.999999999999998.",
+    "bin_col, list1 and map1 carry no minValues/maxValues entry at all: delta-rs computes no column statistics for binary, list or map columns.",
+    "struct1's reported bound is the nested {inner_a, inner_struct} object itself, not a per-leaf scalar \u2014 Delta's stats format nests structs rather than flattening them.",
+    "NaN is accepted in f64 (row index 2) and delta-rs excludes it from both minValues and maxValues, which is why max.f64 is 1.5 rather than NaN.",
+    "Not attempted in this table because probing it separately showed the answer: write_deltalake accepts a pyarrow timestamp('ns') column, but Delta's protocol has no nanosecond timestamp type at all (only 'timestamp' and 'timestamp_ntz', both microsecond) \u2014 delta-rs 1.6.3 silently downcasts, truncating any sub-microsecond digits (a value of 2026-01-01T00:00:00.123456789 round-trips through its own stats as '2026-01-01 00:00:00.123456', losing the trailing 789). This is a writer/format limit, not a polytable one: the format genuinely cannot represent nanosecond precision, and the writer chooses silent truncation over refusal."
+  ],
+  "null_counts": {
+    "dec18_4": 0,
+    "dec38_0": 1,
+    "dec38_37": 1,
+    "dec9_2": 0,
+    "f64": 0,
+    "id": 0,
+    "str_col": 0,
+    "str_nullable": 1,
+    "struct1": {
+      "inner_a": 2,
+      "inner_struct": {
+        "deep": 2
+      }
+    },
+    "ts_ntz": 0,
+    "ts_tz": 0
+  },
+  "table_dir": "torture",
+  "table_name": "torture",
+  "total_rows": 4,
+  "type_schema": [
+    {
+      "name": "id",
+      "nullable": false,
+      "type": "LONG"
+    },
+    {
+      "name": "dec38_0",
+      "nullable": true,
+      "precision": 38,
+      "scale": 0,
+      "type": "DECIMAL"
+    },
+    {
+      "name": "dec38_37",
+      "nullable": true,
+      "precision": 38,
+      "scale": 37,
+      "type": "DECIMAL"
+    },
+    {
+      "name": "dec9_2",
+      "nullable": true,
+      "precision": 9,
+      "scale": 2,
+      "type": "DECIMAL"
+    },
+    {
+      "name": "dec18_4",
+      "nullable": true,
+      "precision": 18,
+      "scale": 4,
+      "type": "DECIMAL"
+    },
+    {
+      "name": "ts_tz",
+      "nullable": true,
+      "type": "TIMESTAMP"
+    },
+    {
+      "name": "ts_ntz",
+      "nullable": true,
+      "type": "TIMESTAMP_NTZ"
+    },
+    {
+      "name": "f64",
+      "nullable": true,
+      "type": "DOUBLE"
+    },
+    {
+      "name": "str_col",
+      "nullable": true,
+      "type": "STRING"
+    },
+    {
+      "name": "str_nullable",
+      "nullable": true,
+      "type": "STRING"
+    },
+    {
+      "name": "bin_col",
+      "nullable": true,
+      "type": "BYTES"
+    },
+    {
+      "fields": [
+        {
+          "name": "inner_a",
+          "nullable": true,
+          "type": "STRING"
+        },
+        {
+          "fields": [
+            {
+              "name": "deep",
+              "nullable": true,
+              "type": "LONG"
+            }
+          ],
+          "name": "inner_struct",
+          "nullable": true,
+          "type": "RECORD"
+        }
+      ],
+      "name": "struct1",
+      "nullable": true,
+      "type": "RECORD"
+    },
+    {
+      "element": {
+        "fields": [
+          {
+            "name": "x",
+            "nullable": true,
+            "type": "LONG"
+          }
+        ],
+        "nullable": true,
+        "type": "RECORD"
+      },
+      "name": "list1",
+      "nullable": true,
+      "type": "LIST"
+    },
+    {
+      "key": {
+        "nullable": false,
+        "type": "STRING"
+      },
+      "name": "map1",
+      "nullable": true,
+      "type": "MAP",
+      "value": {
+        "nullable": true,
+        "type": "LONG"
+      }
+    }
+  ],
+  "writer": {
+    "library": "deltalake",
+    "version": "1.6.3"
+  }
+}

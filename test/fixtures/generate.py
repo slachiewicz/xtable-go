@@ -559,7 +559,7 @@ def generate_delta_torture(out_dir: Path) -> dict:
         null map, per the task's #828 note that these are three different states worth having.
     """
     import deltalake
-    from deltalake import DeltaTable, write_deltalake
+    from deltalake import write_deltalake
 
     _rmtree(out_dir)
     out_dir.mkdir(parents=True)
@@ -662,7 +662,6 @@ def generate_delta_torture(out_dir: Path) -> dict:
     # value outside int64 range without complaint; write_deltalake would raise if either were
     # actually rejected, so reaching get_add_actions below is itself the record of that.
     write_deltalake(table_dir, table, mode="error", name="torture")
-    table_handle = DeltaTable(table_dir)
 
     log_path = table_dir / "_delta_log" / "00000000000000000000.json"
     raw_stats = None
@@ -758,6 +757,14 @@ def generate_delta_torture(out_dir: Path) -> dict:
             "per-leaf scalar — Delta's stats format nests structs rather than flattening them.",
             "NaN is accepted in f64 (row index 2) and delta-rs excludes it from both minValues and "
             "maxValues, which is why max.f64 is 1.5 rather than NaN.",
+            "Not attempted in this table because probing it separately showed the answer: "
+            "write_deltalake accepts a pyarrow timestamp('ns') column, but Delta's protocol has no "
+            "nanosecond timestamp type at all (only 'timestamp' and 'timestamp_ntz', both "
+            "microsecond) — delta-rs 1.6.3 silently downcasts, truncating any sub-microsecond digits "
+            "(a value of 2026-01-01T00:00:00.123456789 round-trips through its own stats as "
+            "'2026-01-01 00:00:00.123456', losing the trailing 789). This is a writer/format limit, "
+            "not a polytable one: the format genuinely cannot represent nanosecond precision, and "
+            "the writer chooses silent truncation over refusal.",
         ],
     }
     _write_manifest(out_dir, manifest)
@@ -771,7 +778,7 @@ def generate_delta_partition_torture(out_dir: Path) -> dict:
     and a value that needs percent-encoding to become a path segment.
     """
     import deltalake
-    from deltalake import DeltaTable, write_deltalake
+    from deltalake import write_deltalake
 
     _rmtree(out_dir)
     out_dir.mkdir(parents=True)
@@ -788,7 +795,6 @@ def generate_delta_partition_torture(out_dir: Path) -> dict:
         schema=schema,
     )
     write_deltalake(table_dir, table, mode="error", partition_by=["region"], name="part_torture")
-    table_handle = DeltaTable(table_dir)
 
     # partitionValues is read from the log directly rather than get_add_actions(flatten=True): the
     # flattened `partition.region` column collapses a null partition value and an empty-string one to
@@ -1195,6 +1201,403 @@ def generate_iceberg_deletes(out_dir: Path) -> dict:
         shutil.rmtree(staging, ignore_errors=True)
 
 
+def _iceberg_manifest_entries(table) -> list[dict]:
+    """Read a pyiceberg table's current snapshot straight out of its own manifests, bypassing
+    `table.inspect.files()`.
+
+    `inspect.files()` builds a pyarrow table of the result, and pyarrow 25.0.1 cannot convert the uuid
+    extension type it uses for a UUID column's bounds — this fixture's own `uid` column trips
+    `ArrowNotImplementedError: extension` inside pyiceberg's own code before this script ever runs.
+    Reading `snapshot.manifests()` / `ManifestFile.fetch_manifest_entry()` directly is pyiceberg's own
+    lower-level API and returns `DataFile` objects untouched by that conversion.
+    """
+    entries = []
+    snapshot = table.current_snapshot()
+    for manifest in snapshot.manifests(table.io):
+        for entry in manifest.fetch_manifest_entry(table.io):
+            entries.append(entry.data_file)
+    return entries
+
+
+def generate_iceberg_torture(out_dir: Path) -> dict:
+    """Write an unpartitioned Iceberg table carrying the same value classes as delta-rs-torture, plus
+    the two Iceberg has and Delta does not: FIXED and UUID.
+
+    Bounds are asserted two ways in the manifest: `column_bounds` is computed here directly from the
+    Python values this script wrote — independent of anything pyiceberg or polytable derived — and
+    `raw_bounds` is the exact bytes pyiceberg's manifest entry recorded for that field id, hex-encoded,
+    for a test that wants to check polytable decoded precisely what was written rather than merely
+    something equivalent to it.
+    """
+    import pyiceberg
+    from pyiceberg.catalog.sql import SqlCatalog
+    from pyiceberg.schema import Schema
+    from pyiceberg.types import (
+        DecimalType,
+        DoubleType,
+        FixedType,
+        ListType,
+        LongType,
+        MapType,
+        NestedField,
+        StringType,
+        StructType,
+        TimestampType,
+        TimestamptzType,
+        UUIDType,
+        BinaryType,
+    )
+
+    _rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+
+    staging = Path(tempfile.mkdtemp(prefix="polytable-pyiceberg-torture-"))
+    try:
+        warehouse = staging / "warehouse"
+        warehouse.mkdir()
+        catalog = SqlCatalog(
+            "fixture",
+            **{"uri": f"sqlite:///{staging / 'catalog.db'}", "warehouse": f"file://{warehouse}"},
+        )
+        catalog.create_namespace("lake")
+
+        schema = Schema(
+            NestedField(1, "id", LongType(), required=True),
+            NestedField(2, "dec38_0", DecimalType(38, 0), required=False),
+            NestedField(3, "dec38_37", DecimalType(38, 37), required=False),
+            NestedField(4, "dec9_2", DecimalType(9, 2), required=False),
+            NestedField(5, "ts_tz", TimestamptzType(), required=False),
+            NestedField(6, "ts_ntz", TimestampType(), required=False),
+            NestedField(7, "f64", DoubleType(), required=False),
+            NestedField(8, "str_col", StringType(), required=False),
+            NestedField(9, "str_nullable", StringType(), required=False),
+            NestedField(10, "bin_col", BinaryType(), required=False),
+            NestedField(11, "fixed4", FixedType(4), required=False),
+            NestedField(12, "uid", UUIDType(), required=False),
+            NestedField(
+                13,
+                "struct1",
+                StructType(
+                    NestedField(14, "inner_a", StringType(), required=False),
+                    NestedField(
+                        15, "inner_struct", StructType(NestedField(16, "deep", LongType(), required=False)), required=False
+                    ),
+                ),
+                required=False,
+            ),
+            NestedField(
+                17,
+                "list1",
+                ListType(18, StructType(NestedField(19, "x", LongType(), required=False)), element_required=False),
+                required=False,
+            ),
+            NestedField(20, "map1", MapType(21, StringType(), 22, LongType(), value_required=False), required=False),
+        )
+        table = catalog.create_table("lake.torture", schema=schema)
+        arrow_schema = table.schema().as_arrow()
+
+        utc = datetime.timezone.utc
+        nyc = ZoneInfo("America/New_York")
+        dst_instant = datetime.datetime(2024, 11, 3, 1, 30, 0, tzinfo=nyc)
+
+        raw = {
+            "id": [1, 2, 3, 4],
+            "dec38_0": [Decimal("9" * 38), Decimal("-" + "9" * 38), None, Decimal("0")],
+            "dec38_37": [
+                Decimal("9." + "9" * 37),
+                Decimal("-9." + "9" * 37),
+                None,
+                Decimal("0." + "0" * 36 + "1"),
+            ],
+            "dec9_2": [Decimal("1234567.89"), Decimal("-1234567.89"), Decimal("0.00"), Decimal("0.01")],
+            "ts_tz": [
+                datetime.datetime(2026, 1, 1, 0, 0, 0, tzinfo=utc),
+                datetime.datetime(1969, 12, 31, 23, 59, 59, 999999, tzinfo=utc),
+                dst_instant,
+                datetime.datetime(2025, 6, 15, 12, 0, 0, tzinfo=utc),
+            ],
+            "ts_ntz": [
+                datetime.datetime(2026, 1, 1, 0, 0, 0, 123456),
+                datetime.datetime(1969, 12, 31, 23, 59, 59, 999999),
+                datetime.datetime(2024, 11, 3, 1, 30, 0),
+                datetime.datetime(2025, 6, 15, 12, 0, 0),
+            ],
+            "f64": [1.0 / 3.0, -0.0, math.nan, 1.5],
+            "str_col": ["héllo wörld 日本語", "line1\nline2\ttab", "", "emoji é̈ combining"],
+            "str_nullable": ["value", "", None, "x"],
+            "bin_col": [b"\x00\x01\xff", b"", None, b"\xff"],
+            "fixed4": [b"\x00\x01\x02\x03", b"\xff\xff\xff\xff", None, b"\x10\x20\x30\x40"],
+            "uid": [
+                uuid.UUID("12345678-1234-5678-1234-567812345678"),
+                uuid.UUID(int=0),
+                None,
+                uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+            ],
+            "struct1": [
+                {"inner_a": "hello", "inner_struct": {"deep": 42}},
+                {"inner_a": None, "inner_struct": None},
+                None,
+                {"inner_a": "world", "inner_struct": {"deep": 7}},
+            ],
+            "list1": [[{"x": 1}, {"x": 2}], [], None, [{"x": 3}]],
+            "map1": [{"a": 1, "b": 2}, {}, None, {"a": None}],
+        }
+        arrow_data = dict(raw)
+        arrow_data["uid"] = [v.bytes if v is not None else None for v in raw["uid"]]
+        table.append(pa.table(arrow_data, schema=arrow_schema))
+        table.refresh()
+
+        entries = _iceberg_manifest_entries(table)
+        if len(entries) != 1:
+            raise RuntimeError(f"expected a single data file, got {len(entries)}")
+        entry = entries[0]
+
+        # pyiceberg's Schema() does not necessarily keep the field ids this script requested — it
+        # renumbers struct/list/map fields declared with an id lower than a nested child's — so the
+        # bound lookup below resolves each top-level scalar column's actual id from the table's own
+        # schema rather than assuming the NestedField ids passed to Schema() above survived unchanged.
+        id_by_name = {
+            f.name: f.field_id
+            for f in table.schema().fields
+            if f.name in {
+                "id", "dec38_0", "dec38_37", "dec9_2", "ts_tz", "ts_ntz", "f64",
+                "str_col", "str_nullable", "bin_col", "fixed4", "uid",
+            }
+        }
+        raw_bounds = {
+            name: {
+                "lower_hex": entry.lower_bounds.get(fid).hex() if entry.lower_bounds.get(fid) is not None else None,
+                "upper_hex": entry.upper_bounds.get(fid).hex() if entry.upper_bounds.get(fid) is not None else None,
+            }
+            for name, fid in id_by_name.items()
+        }
+
+        epoch = datetime.datetime(1970, 1, 1, tzinfo=utc)
+
+        def micros(dt: datetime.datetime) -> int:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=utc)
+            return int((dt - epoch).total_seconds() * 1_000_000)
+
+        def not_none(values):
+            return [v for v in values if v is not None]
+
+        column_bounds = {
+            "id": {"min": min(raw["id"]), "max": max(raw["id"])},
+            "ts_tz": {"min": min(micros(v) for v in not_none(raw["ts_tz"])),
+                      "max": max(micros(v) for v in not_none(raw["ts_tz"]))},
+            "ts_ntz": {"min": min(micros(v) for v in not_none(raw["ts_ntz"])),
+                       "max": max(micros(v) for v in not_none(raw["ts_ntz"]))},
+            # f64's min is -0.0, but -0.0 == 0.0 under Python/Go float comparison, so min() would
+            # accept either sign; the value recorded here is exactly what row 1 wrote, for a test
+            # that wants the bit pattern rather than merely a numerically-equal float.
+            "f64": {"min": -0.0, "max": 1.5},
+            "str_col": {"min": min(not_none(raw["str_col"])), "max": max(not_none(raw["str_col"]))},
+            "str_nullable": {"min": min(not_none(raw["str_nullable"])), "max": max(not_none(raw["str_nullable"]))},
+            "bin_col": {"min_hex": min(not_none(raw["bin_col"])).hex(), "max_hex": max(not_none(raw["bin_col"])).hex()},
+            "fixed4": {"min_hex": min(not_none(raw["fixed4"])).hex(), "max_hex": max(not_none(raw["fixed4"])).hex()},
+            "uid": {
+                "min": str(min(not_none(raw["uid"]))),
+                "max": str(max(not_none(raw["uid"]))),
+            },
+        }
+
+        type_schema = [
+            {"name": "id", "type": "LONG", "nullable": False},
+            {"name": "dec38_0", "type": "DECIMAL", "nullable": True, "precision": 38, "scale": 0},
+            {"name": "dec38_37", "type": "DECIMAL", "nullable": True, "precision": 38, "scale": 37},
+            {"name": "dec9_2", "type": "DECIMAL", "nullable": True, "precision": 9, "scale": 2},
+            {"name": "ts_tz", "type": "TIMESTAMP", "nullable": True},
+            {"name": "ts_ntz", "type": "TIMESTAMP_NTZ", "nullable": True},
+            {"name": "f64", "type": "DOUBLE", "nullable": True},
+            {"name": "str_col", "type": "STRING", "nullable": True},
+            {"name": "str_nullable", "type": "STRING", "nullable": True},
+            {"name": "bin_col", "type": "BYTES", "nullable": True},
+            {"name": "fixed4", "type": "FIXED", "nullable": True, "size": 4},
+            {"name": "uid", "type": "UUID", "nullable": True},
+            {
+                "name": "struct1",
+                "type": "RECORD",
+                "nullable": True,
+                "fields": [
+                    {"name": "inner_a", "type": "STRING", "nullable": True},
+                    {
+                        "name": "inner_struct",
+                        "type": "RECORD",
+                        "nullable": True,
+                        "fields": [{"name": "deep", "type": "LONG", "nullable": True}],
+                    },
+                ],
+            },
+            {
+                "name": "list1",
+                "type": "LIST",
+                "nullable": True,
+                "element": {
+                    "type": "RECORD",
+                    "nullable": True,
+                    "fields": [{"name": "x", "type": "LONG", "nullable": True}],
+                },
+            },
+            {
+                "name": "map1",
+                "type": "MAP",
+                "nullable": True,
+                "key": {"type": "STRING", "nullable": False},
+                "value": {"type": "LONG", "nullable": True},
+            },
+        ]
+
+        table_location = table.location()
+        source_dir = Path(table_location.removeprefix("file://"))
+        target_dir = out_dir / "torture"
+        shutil.copytree(source_dir, target_dir)
+        for metadata_file in sorted(target_dir.glob("metadata/*.metadata.json")):
+            text = metadata_file.read_text(encoding="utf-8")
+            metadata_file.write_text(text.replace(table_location, PATH_PLACEHOLDER), encoding="utf-8")
+        metadata_versions = sorted(int(p.name.split("-", 1)[0]) for p in target_dir.glob("metadata/*.metadata.json"))
+
+        manifest = {
+            "format": "ICEBERG",
+            "table_name": "torture",
+            "table_dir": "torture",
+            "writer": {"library": "pyiceberg", "version": pyiceberg.__version__},
+            "path_placeholder": PATH_PLACEHOLDER,
+            "format_version": table.format_version,
+            "metadata_versions": metadata_versions,
+            "latest_metadata_version": metadata_versions[-1],
+            "manifest_encoding": "avro",
+            "total_rows": 4,
+            "data_file_count": 1,
+            "type_schema": type_schema,
+            "column_bounds": column_bounds,
+            "raw_bounds": raw_bounds,
+            "notes": [
+                "Written by pyiceberg; polytable has never touched this directory.",
+                "column_bounds is computed directly from the Python values this script wrote, "
+                "independent of pyiceberg's own encoding; raw_bounds is the exact lower/upper_bounds "
+                "byte string pyiceberg recorded for that field id, hex-encoded.",
+                "polytable's EncodeBound/DecodeBound (pkg/formats/iceberg/stats.go) has no case for "
+                "DECIMAL: it is listed in that function's own default branch alongside the nested "
+                "types as a bound this port does not serialize or parse. A decimal column here "
+                "therefore carries no ColumnStat.Range at all when read back through polytable, by "
+                "documented design rather than by accident — dec38_0, dec38_37 and dec9_2 are in "
+                "type_schema for the schema-precision assertion but deliberately absent from "
+                "column_bounds.",
+                "table.inspect.files() cannot be used on this fixture: pyarrow 25.0.1 cannot convert "
+                "the uuid extension type back out of the result table pyiceberg builds internally "
+                "(ArrowNotImplementedError: extension). This script reads the manifest entries "
+                "directly instead; see _iceberg_manifest_entries.",
+                "Not attempted in this table because probing it separately showed the answer: "
+                "pyiceberg 0.11.1 does declare pyiceberg.types.TimestampNanoType (Iceberg v3), but "
+                "catalog.create_table() with it under the default format-version 2 raises "
+                "ValueError('timestamp_ns is only supported in 3 or higher'), and asking for "
+                "format-version 3 explicitly raises NotImplementedError('Writing V3 is not yet "
+                "supported') — this writer cannot produce a nanosecond-timestamp Iceberg table at "
+                "all, by its own admission, so there is nothing for polytable's reader to be tested "
+                "against yet.",
+            ],
+        }
+        _write_manifest(out_dir, manifest)
+        return manifest
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def generate_iceberg_partition_torture(out_dir: Path) -> dict:
+    """Write an Iceberg table identity-partitioned on a string column carrying the same partition
+    hazards as delta-rs-partition-torture: a null value, an empty string, and a value that needs
+    escaping in a path.
+    """
+    import pyiceberg
+    from pyiceberg.catalog.sql import SqlCatalog
+    from pyiceberg.partitioning import PartitionField, PartitionSpec
+    from pyiceberg.schema import Schema
+    from pyiceberg.transforms import IdentityTransform
+    from pyiceberg.types import LongType, NestedField, StringType
+
+    _rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+
+    staging = Path(tempfile.mkdtemp(prefix="polytable-pyiceberg-part-torture-"))
+    try:
+        warehouse = staging / "warehouse"
+        warehouse.mkdir()
+        catalog = SqlCatalog(
+            "fixture",
+            **{"uri": f"sqlite:///{staging / 'catalog.db'}", "warehouse": f"file://{warehouse}"},
+        )
+        catalog.create_namespace("lake")
+
+        schema = Schema(
+            NestedField(1, "id", LongType(), required=True),
+            NestedField(2, "region", StringType(), required=False),
+        )
+        spec = PartitionSpec(
+            PartitionField(source_id=2, field_id=1000, transform=IdentityTransform(), name="region")
+        )
+        table = catalog.create_table("lake.part_torture", schema=schema, partition_spec=spec)
+
+        arrow_schema = pa.schema(
+            [pa.field("id", pa.int64(), nullable=False), pa.field("region", pa.string(), nullable=True)]
+        )
+        regions = ["east", None, "", "north america/100%"]
+        table.append(pa.table({"id": [1, 2, 3, 4], "region": regions}, schema=arrow_schema))
+        table.refresh()
+
+        entries = _iceberg_manifest_entries(table)
+        data_files = [
+            {
+                # None here is the partition struct's own null, read straight out of pyiceberg's
+                # Record — not this script's inference from an empty string or a missing key.
+                # index 0: the partition spec here has exactly one field (region).
+                "partition_value": entry.partition[0],
+                "record_count": entry.record_count,
+            }
+            for entry in entries
+        ]
+
+        table_location = table.location()
+        source_dir = Path(table_location.removeprefix("file://"))
+        target_dir = out_dir / "part_torture"
+        shutil.copytree(source_dir, target_dir)
+        for metadata_file in sorted(target_dir.glob("metadata/*.metadata.json")):
+            text = metadata_file.read_text(encoding="utf-8")
+            metadata_file.write_text(text.replace(table_location, PATH_PLACEHOLDER), encoding="utf-8")
+        metadata_versions = sorted(int(p.name.split("-", 1)[0]) for p in target_dir.glob("metadata/*.metadata.json"))
+
+        manifest = {
+            "format": "ICEBERG",
+            "table_name": "part_torture",
+            "table_dir": "part_torture",
+            "writer": {"library": "pyiceberg", "version": pyiceberg.__version__},
+            "path_placeholder": PATH_PLACEHOLDER,
+            "format_version": table.format_version,
+            "metadata_versions": metadata_versions,
+            "latest_metadata_version": metadata_versions[-1],
+            "manifest_encoding": "avro",
+            "total_rows": sum(d["record_count"] for d in data_files),
+            "data_file_count": len(data_files),
+            "partition_columns": ["region"],
+            "data_files": data_files,
+            "notes": [
+                "Written by pyiceberg; polytable has never touched this directory.",
+                "The null-partition row's directory is literally 'region=null' and the empty-string "
+                "row's is 'region=' — pyiceberg, unlike delta-rs, keeps the manifest's own partition "
+                "struct field null for the null case (entry.partition.region is None, not ''), so "
+                "the null/empty distinction survives in the metadata this fixture's manifest was "
+                "built from, independent of how any reader decodes the physical directory name.",
+                "The escaped row's physical directory is 'region=north+america%2F100%25' — pyiceberg "
+                "encodes a space as '+' rather than delta-rs's '%20', and, unlike delta-rs, encodes "
+                "the value exactly once rather than twice.",
+            ],
+        }
+        _write_manifest(out_dir, manifest)
+        return manifest
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 # Every fixture this script can write, keyed by the name `main`'s optional filter argument
 # selects. Each generator mints its own table UUIDs, file names and timestamps per run, so running
 # an entry that is not being worked on churns a fixture already committed to the tree for no reason
@@ -1204,8 +1607,16 @@ FIXTURES = {
     "delta-rs-checkpoint": lambda out_root: generate_delta_checkpoint(out_root / "delta-rs-checkpoint"),
     "delta-rs-deletes": lambda out_root: generate_delta_deletes(out_root / "delta-rs-deletes"),
     "delta-rs-compaction": lambda out_root: generate_delta_compaction(out_root / "delta-rs-compaction"),
+    "delta-rs-torture": lambda out_root: generate_delta_torture(out_root / "delta-rs-torture"),
+    "delta-rs-partition-torture": lambda out_root: generate_delta_partition_torture(
+        out_root / "delta-rs-partition-torture"
+    ),
     "pyiceberg": lambda out_root: generate_iceberg(out_root / "pyiceberg"),
     "pyiceberg-deletes": lambda out_root: generate_iceberg_deletes(out_root / "pyiceberg-deletes"),
+    "pyiceberg-torture": lambda out_root: generate_iceberg_torture(out_root / "pyiceberg-torture"),
+    "pyiceberg-partition-torture": lambda out_root: generate_iceberg_partition_torture(
+        out_root / "pyiceberg-partition-torture"
+    ),
 }
 
 
@@ -1220,6 +1631,9 @@ def _describe(name: str, manifest: dict) -> str:
             f"{name}: {manifest['snapshot_count']} snapshots, {manifest['data_file_count']} files, "
             f"{manifest['total_rows']} rows"
         )
+    if "commit_count" not in manifest:
+        # The torture fixtures are a single write with no commit history to report.
+        return f"{name}: {manifest['data_file_count']} files, {manifest['total_rows']} rows"
     return (
         f"{name}: {manifest['commit_count']} commits, {manifest['data_file_count']} files, "
         f"{manifest['total_rows']} rows"
