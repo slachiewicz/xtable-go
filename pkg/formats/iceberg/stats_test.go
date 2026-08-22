@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"math/big"
 	"testing"
 	"time"
 
@@ -194,10 +195,74 @@ func TestIceberg_BoundEncoding(t *testing.T) {
 			},
 		},
 		{
-			name:   "decimal is not serialized",
+			// A float bound is the *logical* decimal value, not the unscaled integer the wire
+			// format carries, and this port has no schema-driven rescaling for it (see EncodeBound's
+			// doc comment) — so it is refused rather than silently reinterpreted as unscaled.
+			name:   "decimal from a logical float is refused, not reinterpreted as unscaled",
 			schema: model.NewDecimalSchema(10, 2, true),
 			value:  1.25,
 			wantOK: false,
+		},
+		{
+			name:   "decimal small unscaled value",
+			schema: model.NewDecimalSchema(10, 2, true),
+			value:  big.NewInt(12345),
+			want:   big.NewInt(12345),
+			wantOK: true,
+		},
+		{
+			name:   "decimal negative unscaled value",
+			schema: model.NewDecimalSchema(10, 2, true),
+			value:  big.NewInt(-12345),
+			want:   big.NewInt(-12345),
+			wantOK: true,
+		},
+		{
+			name:   "decimal accepts a plain int64 unscaled value",
+			schema: model.NewDecimalSchema(18, 4, true),
+			value:  int64(-1),
+			want:   big.NewInt(-1),
+			wantOK: true,
+		},
+		{
+			// dec38_0's own recorded bound in test/testdata/fixtures/pyiceberg-torture: the unscaled
+			// value of a decimal(38,0) at its widest, an order of magnitude past int64's range.
+			name:   "decimal unscaled value above the int64 range",
+			schema: model.NewDecimalSchema(38, 0, true),
+			value:  mustBigInt(t, "99999999999999999999999999999999999999"),
+			want:   mustBigInt(t, "99999999999999999999999999999999999999"),
+			wantOK: true,
+		},
+		{
+			name:   "decimal unscaled value below the int64 range",
+			schema: model.NewDecimalSchema(38, 0, true),
+			value:  mustBigInt(t, "-99999999999999999999999999999999999999"),
+			want:   mustBigInt(t, "-99999999999999999999999999999999999999"),
+			wantOK: true,
+		},
+		{
+			// A large-scale decimal, decimal(38,37): the scale itself does not change the wire
+			// encoding at all — it only changes how the unscaled integer is interpreted, which is
+			// the field schema's concern, not EncodeBound/DecodeBound's.
+			name:   "decimal at a large scale",
+			schema: model.NewDecimalSchema(38, 37, true),
+			value:  mustBigInt(t, "-99999999999999999999999999999999999999"),
+			want:   mustBigInt(t, "-99999999999999999999999999999999999999"),
+			wantOK: true,
+		},
+		{
+			name:   "decimal unscaled zero",
+			schema: model.NewDecimalSchema(10, 2, true),
+			value:  big.NewInt(0),
+			want:   big.NewInt(0),
+			wantOK: true,
+		},
+		{
+			name:   "decimal accepts a base-10 unscaled string",
+			schema: model.NewDecimalSchema(10, 2, true),
+			value:  "-129",
+			want:   big.NewInt(-129),
+			wantOK: true,
 		},
 		{
 			name:   "nil value",
@@ -228,6 +293,16 @@ func TestIceberg_BoundEncoding(t *testing.T) {
 			require.True(t, ok)
 			if tt.checkFn != nil {
 				tt.checkFn(t, decoded)
+				return
+			}
+			// big.Int has two internal representations of zero (nil abs versus an empty, non-nil
+			// nat), which reflect.DeepEqual — and so assert.Equal — treats as unequal even though
+			// Cmp reports them as the same value. Compare numerically for *big.Int, structurally
+			// otherwise.
+			if wantBig, ok := tt.want.(*big.Int); ok {
+				decodedBig, isBig := decoded.(*big.Int)
+				require.True(t, isBig, "decoded value is not *big.Int: %T", decoded)
+				assert.Zero(t, wantBig.Cmp(decodedBig), "want %s, got %s", wantBig, decodedBig)
 				return
 			}
 			assert.Equal(t, tt.want, decoded)
@@ -263,6 +338,84 @@ func TestIceberg_DecodeBoundRejectsMalformedInput(t *testing.T) {
 			decoded, ok := iceberg.DecodeBound(tt.schema, tt.raw)
 			assert.False(t, ok)
 			assert.Nil(t, decoded)
+		})
+	}
+}
+
+// TestIceberg_DecodeBoundDistinguishesMissingFromEmpty pins T70 defect 5: a nil []byte ("this field
+// id is not in the manifest's bounds map at all") and a non-nil, zero-length []byte ("the writer
+// recorded an empty string or empty binary minimum") used to collapse to the same "no bound"
+// result. They must not.
+func TestIceberg_DecodeBoundDistinguishesMissingFromEmpty(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		schema  *model.Schema
+		raw     []byte
+		wantOK  bool
+		wantVal any
+	}{
+		{
+			name:   "missing string bound is nil raw and reports false",
+			schema: model.NewPrimitiveSchema(model.TypeString, true),
+			raw:    nil,
+			wantOK: false,
+		},
+		{
+			name:    "present empty string bound decodes to the empty string",
+			schema:  model.NewPrimitiveSchema(model.TypeString, true),
+			raw:     []byte{},
+			wantOK:  true,
+			wantVal: "",
+		},
+		{
+			name:   "missing binary bound is nil raw and reports false",
+			schema: model.NewPrimitiveSchema(model.TypeBytes, true),
+			raw:    nil,
+			wantOK: false,
+		},
+		{
+			name:    "present empty binary bound decodes to a non-nil empty slice",
+			schema:  model.NewPrimitiveSchema(model.TypeBytes, true),
+			raw:     []byte{},
+			wantOK:  true,
+			wantVal: []byte{},
+		},
+		{
+			// A fixed-width type has no zero-length encoding at all, so an empty-but-present bound
+			// here is a malformed manifest entry: still "no usable bound", but for a length reason
+			// rather than the missing-vs-empty distinction this test otherwise exercises.
+			name:   "present empty bound for a fixed-width type is still rejected, by length",
+			schema: model.NewPrimitiveSchema(model.TypeLong, true),
+			raw:    []byte{},
+			wantOK: false,
+		},
+		{
+			name:   "present empty decimal bound is rejected: zero has no zero-length encoding",
+			schema: model.NewDecimalSchema(10, 2, true),
+			raw:    []byte{},
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			decoded, ok := iceberg.DecodeBound(tt.schema, tt.raw)
+			require.Equal(t, tt.wantOK, ok)
+			if !tt.wantOK {
+				assert.Nil(t, decoded)
+				return
+			}
+			assert.Equal(t, tt.wantVal, decoded)
+			// assert.Equal on []byte treats nil and an empty slice as equal (bytes.Equal), which
+			// would hide exactly the defect this test exists to catch, so nilness is checked
+			// separately for the binary case.
+			if _, isBytes := tt.wantVal.([]byte); isBytes {
+				assert.NotNil(t, decoded, "empty binary bound decoded to a nil slice, indistinguishable from missing")
+			}
 		})
 	}
 }
@@ -390,6 +543,16 @@ func TestIceberg_ColumnStatsKeyedByFieldID(t *testing.T) {
 	assert.Equal(t, int64(500), stat.Range.MaxValue)
 	assert.Equal(t, int64(1), stat.NumNulls)
 	assert.Equal(t, int64(7), stat.TotalValues)
+}
+
+// mustBigInt parses a base-10 unscaled decimal value used across the DECIMAL test cases; the
+// literal is kept as a string in the test table because it exceeds what an untyped Go integer
+// constant can hold portably.
+func mustBigInt(t *testing.T, s string) *big.Int {
+	t.Helper()
+	n, ok := new(big.Int).SetString(s, 10)
+	require.True(t, ok, "malformed big.Int literal in test table: %q", s)
+	return n
 }
 
 func statsByFieldName(t *testing.T, stats []*model.ColumnStat) map[string]*model.ColumnStat {

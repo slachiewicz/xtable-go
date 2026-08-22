@@ -20,6 +20,7 @@ package iceberg
 import (
 	"encoding/binary"
 	"math"
+	"math/big"
 	"strconv"
 
 	"github.com/google/uuid"
@@ -47,8 +48,17 @@ const (
 // serialization, which is what the `lower_bounds` and `upper_bounds` maps of a manifest entry hold.
 //
 // It reports false when the value carries no usable bound: a nil value, a NaN float — Iceberg
-// forbids NaN bounds and tracks NaN counts separately — or a type this port does not serialize
-// (decimal and the nested types). Callers omit the bound in that case rather than failing.
+// forbids NaN bounds and tracks NaN counts separately — or a type this port does not serialize (the
+// nested types have no single-value form at all). Callers omit the bound in that case rather than
+// failing.
+//
+// DECIMAL encodes the unscaled value (schema and scale agree on where the point goes; the wire
+// format only ever carries the integer) as minimal two's-complement big-endian bytes, per the
+// specification. The accepted Go shapes are *big.Int, the built-in integer types, and a base-10
+// string of the unscaled integer — deliberately not float32/float64: a float bound arriving here is
+// the *logical* decimal value (e.g. from Delta's JSON-decoded stats), and reinterpreting it as
+// already-unscaled would silently write the wrong bound rather than merely omitting it. That is
+// worse than the previous behavior, so it is refused here the same as any other unusable value.
 func EncodeBound(schema *model.Schema, value any, pos BoundPosition) ([]byte, bool) {
 	if schema == nil || value == nil {
 		return nil, false
@@ -127,9 +137,15 @@ func EncodeBound(schema *model.Schema, value any, pos BoundPosition) ([]byte, bo
 		}
 		return b, true
 
+	case model.TypeDecimal:
+		n, ok := coerceBigInt(value)
+		if !ok {
+			return nil, false
+		}
+		return encodeUnscaledDecimal(n), true
+
 	default:
-		// DECIMAL needs the minimal big-endian two's-complement encoding of the unscaled value and
-		// the nested types have no single-value form at all. Omitting the bound loses pruning
+		// The nested types have no single-value form at all. Omitting the bound loses pruning
 		// power; writing it wrong loses rows.
 		return nil, false
 	}
@@ -137,13 +153,21 @@ func EncodeBound(schema *model.Schema, value any, pos BoundPosition) ([]byte, bo
 
 // DecodeBound reverses EncodeBound, returning a Go value typed after the field schema: int32 for
 // int and date, int64 for long and the timestamps, float32/float64 for the floating types, string
-// for string, enum and uuid, []byte for binary and fixed.
+// for string, enum and uuid, []byte for binary and fixed, *big.Int (the unscaled value) for decimal.
 //
-// It reports false for an empty bound, for a length that does not match the type, and for a NaN
+// It reports false for a *missing* bound, for a length that does not match the type, and for a NaN
 // float — a NaN that reaches this point came from a writer that ignored the Iceberg rule, and
 // letting it into the model would break every JSON encoder downstream.
+//
+// "Missing" is raw == nil specifically, not len(raw) == 0: a manifest entry can legitimately record
+// an empty string or an empty binary minimum, and that has to decode to "" / a non-nil empty []byte
+// rather than collapse to the same "no bound at all" result a genuinely absent entry produces.
+// Callers reading a bound out of a map — a Go map returns the nil zero value for a missing key —
+// get this distinction for free; a caller that cannot tell the two apart at the source must
+// normalize an unrecorded entry to nil and a recorded-but-empty one to a non-nil empty slice before
+// calling this.
 func DecodeBound(schema *model.Schema, raw []byte) (any, bool) {
-	if schema == nil || len(raw) == 0 {
+	if schema == nil || raw == nil {
 		return nil, false
 	}
 
@@ -199,6 +223,15 @@ func DecodeBound(schema *model.Schema, raw []byte) (any, bool) {
 	case model.TypeBytes, model.TypeFixed:
 		return raw, true
 
+	case model.TypeDecimal:
+		// Unlike the fixed-width numeric types above, DECIMAL has no representation for a
+		// zero-length payload — the minimal encoding of 0 is one byte (0x00) — so an empty-but-
+		// present bound here is a malformed manifest entry, not a legitimate value.
+		if len(raw) == 0 {
+			return nil, false
+		}
+		return decodeUnscaledDecimal(raw), true
+
 	default:
 		return nil, false
 	}
@@ -240,14 +273,31 @@ func columnStatsFromManifest(mdf *ManifestDataFile, schema *model.Schema) []*mod
 			NumNulls:    mdf.NullValueCounts[id],
 			NumNaNs:     mdf.NanValueCounts[id],
 		}
-		minVal, hasMin := DecodeBound(field.Schema, mdf.LowerBounds[id])
-		maxVal, hasMax := DecodeBound(field.Schema, mdf.UpperBounds[id])
+		minVal, hasMin := DecodeBound(field.Schema, boundBytes(mdf.LowerBounds, id))
+		maxVal, hasMax := DecodeBound(field.Schema, boundBytes(mdf.UpperBounds, id))
 		if hasMin || hasMax {
 			stat.Range = model.NewRange(minVal, maxVal)
 		}
 		stats = append(stats, stat)
 	}
 	return stats
+}
+
+// boundBytes reads a bound out of a manifest's bytes map, normalizing what DecodeBound sees so that
+// "no entry for this field id" and "entry present but the Avro decoder handed back a nil slice for
+// a zero-length value" are not conflated. A plain map index cannot make this distinction on its
+// own: both a missing key and a present key whose value happens to be a nil []byte return the same
+// nil. The two-value form recovers presence; a present-but-nil value is then normalized to a
+// non-nil empty slice, which DecodeBound treats as a genuinely empty (not missing) bound.
+func boundBytes(m map[int][]byte, id int) []byte {
+	raw, ok := m[id]
+	if !ok {
+		return nil
+	}
+	if raw == nil {
+		return []byte{}
+	}
+	return raw
 }
 
 // manifestHasStatsFor reports whether any statistic map mentions the field. Presence in the bound
@@ -425,4 +475,99 @@ func coerceBytes(v any) ([]byte, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// coerceBigInt accepts the shapes a decimal bound's unscaled value arrives in: *big.Int and big.Int
+// itself (what DecodeBound hands back, round-tripped), the built-in integer types, and a base-10
+// string of the unscaled integer. Floating-point is deliberately not accepted here — see
+// EncodeBound's doc comment for why treating a logical float as an already-unscaled integer would
+// be worse than refusing it.
+func coerceBigInt(v any) (*big.Int, bool) {
+	switch x := v.(type) {
+	case *big.Int:
+		if x == nil {
+			return nil, false
+		}
+		return x, true
+	case big.Int:
+		return new(big.Int).Set(&x), true
+	case int:
+		return big.NewInt(int64(x)), true
+	case int8:
+		return big.NewInt(int64(x)), true
+	case int16:
+		return big.NewInt(int64(x)), true
+	case int32:
+		return big.NewInt(int64(x)), true
+	case int64:
+		return big.NewInt(x), true
+	case uint:
+		return new(big.Int).SetUint64(uint64(x)), true
+	case uint8:
+		return big.NewInt(int64(x)), true
+	case uint16:
+		return big.NewInt(int64(x)), true
+	case uint32:
+		return big.NewInt(int64(x)), true
+	case uint64:
+		return new(big.Int).SetUint64(x), true
+	case string:
+		n, ok := new(big.Int).SetString(x, 10)
+		if !ok {
+			return nil, false
+		}
+		return n, true
+	default:
+		return nil, false
+	}
+}
+
+// encodeUnscaledDecimal renders n as the minimal-length two's-complement big-endian byte sequence
+// the Iceberg specification requires for a DECIMAL single value: zero is one zero byte, a positive
+// value gains a leading 0x00 byte whenever its high bit would otherwise read as a sign bit, and a
+// negative value uses the smallest byte count whose two's-complement range contains it.
+func encodeUnscaledDecimal(n *big.Int) []byte {
+	switch n.Sign() {
+	case 0:
+		return []byte{0}
+	case 1:
+		b := n.Bytes()
+		if b[0]&0x80 != 0 {
+			b = append([]byte{0}, b...)
+		}
+		return b
+	default:
+		abs := new(big.Int).Neg(n)
+		numBytes := (abs.BitLen() + 7) / 8
+		if numBytes == 0 {
+			numBytes = 1
+		}
+		// A k-byte two's-complement value can represent down to -2^(8k-1); grow by one byte if the
+		// magnitude does not fit that range (e.g. -129 needs two bytes, not the one its bit length
+		// alone would suggest).
+		limit := new(big.Int).Lsh(big.NewInt(1), uint(8*numBytes-1)) //nolint:gosec // numBytes is small and non-negative
+		if abs.Cmp(limit) > 0 {
+			numBytes++
+		}
+		modulus := new(big.Int).Lsh(big.NewInt(1), uint(8*numBytes)) //nolint:gosec // numBytes is small and non-negative
+		complement := new(big.Int).Add(modulus, n)
+		out := complement.Bytes()
+		if len(out) < numBytes {
+			padded := make([]byte, numBytes)
+			copy(padded[numBytes-len(out):], out)
+			out = padded
+		}
+		return out
+	}
+}
+
+// decodeUnscaledDecimal reverses encodeUnscaledDecimal. raw is assumed non-empty; the DECIMAL case
+// in DecodeBound checks that before calling this.
+func decodeUnscaledDecimal(raw []byte) *big.Int {
+	n := new(big.Int).SetBytes(raw)
+	if raw[0]&0x80 != 0 {
+		modulus := new(big.Int).Lsh(big.NewInt(1), uint(8*len(raw))) //nolint:gosec // len(raw) is small and non-negative
+		n.Sub(n, modulus)
+	}
+	return n
 }

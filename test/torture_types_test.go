@@ -35,6 +35,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -375,11 +376,11 @@ func TestTortureTypes_DeltaPartitionNullVsEmpty(t *testing.T) {
 // TestTortureTypes_IcebergSchema checks pyiceberg-torture's schema, including the two types Iceberg
 // has that Delta does not: FIXED and UUID.
 //
-// fixed4 is a known, load-bearing gap: pkg/formats/iceberg/schema.go's parseIcebergType has no case
-// for Iceberg's `"fixed[N]"` type string, so it falls through to the function's default branch and
-// arrives as TypeString with no size metadata and, critically, no error or warning — the task's
-// "fail or warn by name, not silently narrow" clause names exactly this shape of defect. The correct
-// assertion is left in the test, skipped, rather than weakened to match the narrowing.
+// fixed4 used to be a known, load-bearing gap: pkg/formats/iceberg/schema.go's parseIcebergType had
+// no case for Iceberg's `"fixed[N]"` type string, so it fell through to the function's default
+// branch and arrived as TypeString with no size metadata and, critically, no error or warning. That
+// default branch now returns iceberg.ErrUnsupportedIcebergType instead of narrowing to STRING for
+// any type it still cannot translate, and fixed[N] itself is parsed below like every other field.
 func TestTortureTypes_IcebergSchema(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -394,9 +395,6 @@ func TestTortureTypes_IcebergSchema(t *testing.T) {
 	require.NotNil(t, table.ReadSchema)
 
 	for _, node := range manifest.TypeSchema {
-		if node.Name == "fixed4" {
-			continue
-		}
 		field := table.ReadSchema.FieldByPath(node.Name)
 		require.NotNil(t, field, "field %s is missing", node.Name)
 		require.NotNil(t, field.Schema)
@@ -406,10 +404,6 @@ func TestTortureTypes_IcebergSchema(t *testing.T) {
 	}
 
 	t.Run("fixed_type_preserved", func(t *testing.T) {
-		t.Skip("known defect: pkg/formats/iceberg/schema.go parseIcebergType has no case for " +
-			"Iceberg's fixed[N] type string; it falls through to the default branch and silently " +
-			"arrives as TypeString with no size metadata and no error or warning.")
-
 		field := table.ReadSchema.FieldByPath("fixed4")
 		require.NotNil(t, field)
 		require.NotNil(t, field.Schema)
@@ -445,36 +439,28 @@ func TestTortureTypes_IcebergColumnBounds(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, snapshot.DataFiles, manifest.DataFileCount)
 
-	// fixed4's bound is a downstream consequence of the schema defect TestTortureTypes_IcebergSchema
-	// already names: because parseIcebergType mis-parses fixed[4] as TypeString, DecodeBound switches
-	// on that (wrong) type and decodes the bound as a Go string instead of raw bytes. It is not a
-	// second, independent defect, so it is skipped here rather than re-reported.
-	//
 	// str_col, str_nullable and bin_col each have a *minimum* that is the empty string or empty
-	// bytes — exactly the value class the task asks for ("an empty string versus null"). That
-	// minimum is a second, independent, confirmed defect: DecodeBound's own
-	// `if schema == nil || len(raw) == 0 { return nil, false }` treats a zero-length bound the same
-	// as "no bound was recorded", so a genuinely empty lower bound decodes as no bound at all
-	// (Range.MinValue == nil) rather than as "". Their maxima are unaffected and checked normally.
-	emptyMinimumDefect := map[string]bool{"str_col": true, "str_nullable": true, "bin_col": true}
+	// bytes — exactly the value class the task asks for ("an empty string versus null"). Their
+	// min_hex/min in the fixture is itself "" — byte-for-byte indistinguishable from "no hex was
+	// recorded" — so they are checked directly against the empty value here rather than through
+	// assertTortureBound/assertRawBoundEncodesTo, which share that same ambiguity. Their maxima are
+	// unaffected and checked normally.
+	emptyMinimum := map[string]any{"str_col": "", "str_nullable": "", "bin_col": []byte{}}
 
 	for name, expected := range manifest.ColumnBounds {
 		t.Run(name, func(t *testing.T) {
-			if name == "fixed4" {
-				t.Skip("blocked on the FIXED schema defect (see TestTortureTypes_IcebergSchema): " +
-					"fixed4's bound decodes as a Go string via DecodeBound's TypeString case, not " +
-					"as []byte, because the schema itself was mis-parsed as TypeString")
-			}
-
 			stat := tortureColumnStat(snapshot.DataFiles, name)
 			require.NotNil(t, stat, "no column statistic for %s", name)
 			require.NotNil(t, stat.Range, "%s carries no bound", name)
 
-			if emptyMinimumDefect[name] {
-				assert.Nil(t, stat.Range.MinValue,
-					"%s's minimum is no longer nil; DecodeBound's zero-length-bound handling in "+
-						"pkg/formats/iceberg/stats.go appears to have been fixed — drop this pin and "+
-						"assert the real (empty) value", name)
+			if want, ok := emptyMinimum[name]; ok {
+				assert.Equal(t, want, stat.Range.MinValue, "%s minimum", name)
+				if _, isBytes := want.([]byte); isBytes {
+					// assert.Equal on []byte treats nil and an empty slice as equal, which would
+					// hide the exact defect this fixture exists to catch.
+					assert.NotNil(t, stat.Range.MinValue,
+						"%s minimum decoded to nil, indistinguishable from a missing bound", name)
+				}
 				assertTortureBound(t, expected.Max, expected.MaxHex, stat.Range.MaxValue, name+" maximum")
 				assertRawBoundEncodesTo(t, stat, "", manifest.RawBounds[name].UpperHex, name)
 				return
@@ -500,7 +486,13 @@ func TestTortureTypes_IcebergColumnBounds(t *testing.T) {
 		assert.True(t, math.Signbit(minVal), "negative zero lost its sign bit reading it back: got %v", minVal)
 	})
 
-	t.Run("decimal_bounds_not_decoded", func(t *testing.T) {
+	// decimal_bounds_decoded is the flipped form of what used to be decimal_bounds_not_decoded: with
+	// EncodeBound/DecodeBound's DECIMAL case in place, dec38_0 and dec38_37 exercise exactly the
+	// values T70 called out — an unscaled magnitude an order of magnitude past int64's range, at
+	// scale 0 and at scale 37 — and dec9_2 stays within int64 to confirm the ordinary case too. The
+	// check is the same round trip assertTortureBound/assertRawBoundEncodesTo already use elsewhere:
+	// re-encoding what polytable decoded has to reproduce pyiceberg's own recorded bytes exactly.
+	t.Run("decimal_bounds_decoded", func(t *testing.T) {
 		for _, name := range []string{"dec38_0", "dec38_37", "dec9_2"} {
 			raw, ok := manifest.RawBounds[name]
 			require.True(t, ok, "fixture manifest carries no raw_bounds for %s", name)
@@ -509,9 +501,10 @@ func TestTortureTypes_IcebergColumnBounds(t *testing.T) {
 
 			stat := tortureColumnStat(snapshot.DataFiles, name)
 			require.NotNil(t, stat, "no column statistic for %s", name)
-			assert.Nil(t, stat.Range,
-				"%s now carries a Range; EncodeBound/DecodeBound in pkg/formats/iceberg/stats.go "+
-					"appear to have gained a DECIMAL case — drop this pin and assert the real bound", name)
+			require.NotNil(t, stat.Range, "%s carries no bound", name)
+			_, isBigInt := stat.Range.MinValue.(*big.Int)
+			assert.True(t, isBigInt, "%s minimum is not *big.Int: %T", name, stat.Range.MinValue)
+			assertRawBoundEncodesTo(t, stat, raw.LowerHex, raw.UpperHex, name)
 		}
 	})
 }
@@ -832,10 +825,11 @@ func TestTortureTypes_ConvertDeltaTortureAcrossTargets(t *testing.T) {
 // is a faithful, re-parseable transcription rather than a lossy one. It is asserted here as the
 // correct, intended behavior.
 //
-// FIXED is folded into the schema defect TestTortureTypes_IcebergSchema already names
-// (parseIcebergType has no fixed[N] case) rather than re-reported: since the *source* schema recovery
-// already mis-reports fixed4 as STRING, this conversion has nothing FIXED-shaped left to lose by the
-// time it reaches Delta.
+// FIXED narrows to Delta BYTES for the same reason UUID narrows to STRING: Delta has no fixed-width
+// binary type, and pkg/formats/delta/schema.go's typeToDeltaJSON folds TypeFixed into the same
+// `case model.TypeBytes, model.TypeFixed` as ordinary binary, deliberately rather than by accident.
+// It is asserted here as the correct, intended behavior, once the Iceberg *source* itself stopped
+// mis-reporting fixed4 as STRING (see TestTortureTypes_IcebergSchema's fixed_type_preserved).
 func TestTortureTypes_ConvertIcebergTortureIntoDelta(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -880,12 +874,11 @@ func TestTortureTypes_ConvertIcebergTortureIntoDelta(t *testing.T) {
 			"Delta has no UUID type; typeToDeltaJSON's explicit TypeUUID case maps it to STRING")
 	})
 
-	t.Run("fixed_type_already_lost_upstream", func(t *testing.T) {
+	t.Run("fixed_type_becomes_delta_bytes_by_design", func(t *testing.T) {
 		field := table.ReadSchema.FieldByPath("fixed4")
 		require.NotNil(t, field)
 		require.NotNil(t, field.Schema)
-		// See TestTortureTypes_IcebergSchema's fixed_type_preserved: the Iceberg *source* already
-		// mis-reports this column as TypeString before the Delta target ever sees it.
-		assert.Equal(t, model.TypeString, field.Schema.DataType)
+		assert.Equal(t, model.TypeBytes, field.Schema.DataType,
+			"Delta has no fixed-width binary type; typeToDeltaJSON's explicit TypeFixed case maps it to BYTES")
 	})
 }
