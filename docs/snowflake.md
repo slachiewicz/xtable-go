@@ -479,6 +479,22 @@ OAuth2 code path, not a new auth mode. Neither is built.
   `DROP NETWORK POLICY <policy_name>;`.
 - Revoke or rotate the programmatic access token from Snowsight if it was created only for this
   test.
+- Drop anything the S3 worked example created on the Snowflake side, in this order:
+  `DROP ICEBERG TABLE <db>.<schema>.<table>;` then `DROP EXTERNAL VOLUME <volume_name>;`. Dropping
+  the volume does not remove the data files it wrote into your bucket.
+- **The AWS side of the worked example is not a Snowflake resource and survives every step above.**
+  The external volume's bucket holds the table's data and metadata, and the IAM role it assumes is
+  a standing trust relationship with Snowflake's AWS account:
+  ```shell
+  aws s3 rm "s3://<bucket>" --recursive
+  aws s3 rb "s3://<bucket>"
+  aws iam delete-role-policy --role-name <role_name> --policy-name <inline_policy_name>
+  aws iam delete-role --role-name <role_name>
+  ```
+  The role carries an **inline** policy, so it needs `delete-role-policy`; the `detach-role-policy`
+  shape in [AWS test environment](aws-test-environment.md#teardown) applies to managed policies and
+  fails here. Deleting the role breaks the external volume immediately, so drop the volume first if
+  you want the Snowflake objects to tear down cleanly.
 
 ## Troubleshooting
 
