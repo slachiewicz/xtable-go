@@ -304,12 +304,10 @@ func TestTortureTypes_DeltaColumnBounds(t *testing.T) {
 // partition value, an empty-string one and an ordinary one, read back through polytable's Delta
 // source.
 //
-// The first two currently collide. pkg/formats/delta/actions.go declares
-// `AddAction.PartitionValues map[string]string`, and Go's encoding/json decodes a JSON `null` into a
-// map's string-typed value as the zero value "" — indistinguishable from a row whose partition value
-// was genuinely the empty string. This is #828's defect family, named in the task this fixture was
-// written for; pkg/formats/delta is out of scope for this change, so the assertion that would catch
-// a fix is left in place but skipped rather than adjusted to match the collision.
+// Fixed under T70 defect 2: pkg/formats/delta/actions.go's AddAction.PartitionValues is now
+// map[string]*string rather than map[string]string, so a JSON null decodes as a nil *string
+// instead of colliding with a genuine empty string at the zero value "". This is #828's defect
+// family, named in the task this fixture was written for.
 func TestTortureTypes_DeltaPartitionNullVsEmpty(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -347,21 +345,14 @@ func TestTortureTypes_DeltaPartitionNullVsEmpty(t *testing.T) {
 	}
 
 	t.Run("null_distinct_from_empty_string", func(t *testing.T) {
-		t.Skip("known defect: pkg/formats/delta AddAction.PartitionValues is map[string]string, so " +
-			"encoding/json decodes both a JSON null partition value and a genuine empty string to " +
-			"\"\" — the null-partition (__HIVE_DEFAULT_PARTITION__) and empty-string (region=) rows " +
-			"of this fixture are not distinguishable after the read. See #828 in the task notes; " +
-			"pkg/formats/delta is out of scope for this change.")
-
 		var sawNull, sawEmpty bool
 		for _, file := range snapshot.DataFiles {
-			value, _ := file.PartitionValues[0].Range.MinValue.(string)
-			if value == "" {
+			value, ok := file.PartitionValues[0].Range.MinValue.(string)
+			if ok && value == "" {
 				sawEmpty = true
 			}
 		}
-		// Once fixed, a null partition value should decode as a nil Range.MinValue (or some other
-		// explicit not-a-string marker) rather than "".
+		// A null partition value decodes as a nil Range.MinValue rather than "".
 		for _, file := range snapshot.DataFiles {
 			if file.PartitionValues[0].Range.MinValue == nil {
 				sawNull = true

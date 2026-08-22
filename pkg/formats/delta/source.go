@@ -503,13 +503,21 @@ func (s *Source) convertAddAction(add *AddAction, table *model.Table) *model.Dat
 		LastModified:  add.ModificationTime,
 	}
 
-	// Parse Partition Values
+	// Parse Partition Values. val is *string: a nil entry is a genuine JSON null partition value
+	// (the __HIVE_DEFAULT_PARTITION__ case) and must become a nil Range.MinValue, not the string
+	// "<nil>" or the empty string — those two are handled explicitly rather than passing the
+	// pointer straight to NewScalarRange, which would wrap it in a non-nil `any` holding a nil
+	// *string and defeat both the `== nil` check and the `.(string)` type assertion downstream.
 	if len(add.PartitionValues) > 0 && table != nil {
 		for _, pf := range table.PartitioningFields {
 			if val, ok := add.PartitionValues[pf.SourceField.Name]; ok {
+				var value any
+				if val != nil {
+					value = *val
+				}
 				dataFile.PartitionValues = append(dataFile.PartitionValues, &model.PartitionValue{
 					PartitionField: pf,
-					Range:          model.NewScalarRange(val),
+					Range:          model.NewScalarRange(value),
 				})
 			}
 		}

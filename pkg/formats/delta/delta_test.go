@@ -145,6 +145,88 @@ func TestDelta_SnapshotCommitAndRead(t *testing.T) {
 	assert.Contains(t, meta.CustomProperties, model.KeyXTableMetadata)
 }
 
+// TestDelta_PartitionValueNullVsEmptyRoundTrip is T70 defect 2's write-side half: a nil
+// Range.MinValue (a genuine null partition value) must marshal to JSON null in the commit log, not
+// the string "<nil>" that fmt.Sprintf("%v", nil) produces, and reading the log back must reproduce
+// the same nil-vs-empty-string distinction the source side already preserves.
+func TestDelta_PartitionValueNullVsEmptyRoundTrip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	memStorage := io.NewMemoryStorage()
+	basePath := "mem://lake/partition_null_roundtrip"
+
+	idField := &model.Field{Name: "id", Schema: model.NewPrimitiveSchema(model.TypeInt, false)}
+	regionField := &model.Field{Name: "region", Schema: model.NewPrimitiveSchema(model.TypeString, true)}
+	schema := model.NewRecordSchema("events", []*model.Field{idField, regionField}, false)
+
+	partField := &model.PartitionField{SourceField: regionField, TransformType: model.PartitionTransformValue}
+	table := &model.Table{
+		Name:               "events",
+		TableFormat:        model.TableFormatDelta,
+		ReadSchema:         schema,
+		BasePath:           basePath,
+		PartitioningFields: []*model.PartitionField{partField},
+		LatestCommitTime:   time.Now().UnixMilli(),
+	}
+
+	newFile := func(path string, minValue any) *model.DataFile {
+		return &model.DataFile{
+			PhysicalPath:  basePath + "/" + path,
+			FileFormat:    model.FileFormatParquet,
+			FileSizeBytes: 100,
+			RecordCount:   1,
+			PartitionValues: []*model.PartitionValue{
+				{PartitionField: partField, Range: model.NewScalarRange(minValue)},
+			},
+			LastModified: time.Now().UnixMilli(),
+		}
+	}
+
+	snapshot := &model.Snapshot{
+		Table: table,
+		DataFiles: []*model.DataFile{
+			newFile("region=east/part-0.parquet", "east"),
+			newFile("region=/part-1.parquet", ""),
+			newFile("region=__HIVE_DEFAULT_PARTITION__/part-2.parquet", nil),
+		},
+		SourceIdentifier: "snap-1",
+	}
+
+	target := delta.NewTarget(memStorage)
+	require.NoError(t, target.Init(ctx, table))
+	require.NoError(t, target.CommitSnapshot(ctx, snapshot))
+
+	// The commit log's raw JSON must carry a real null, never the literal "<nil>".
+	raw, err := memStorage.Read(ctx, io.JoinPath(basePath, "_delta_log", "00000000000000000000.json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"partitionValues":{"region":null}`)
+	assert.Contains(t, string(raw), `"partitionValues":{"region":"east"}`)
+	assert.Contains(t, string(raw), `"partitionValues":{"region":""}`)
+	assert.NotContains(t, string(raw), "<nil>")
+
+	source := delta.NewSource(memStorage, basePath)
+	readSnapshot, err := source.GetCurrentSnapshot(ctx)
+	require.NoError(t, err)
+	require.Len(t, readSnapshot.DataFiles, 3)
+
+	var sawEast, sawEmpty, sawNull bool
+	for _, file := range readSnapshot.DataFiles {
+		require.Len(t, file.PartitionValues, 1)
+		switch file.PartitionValues[0].Range.MinValue {
+		case nil:
+			sawNull = true
+		case "east":
+			sawEast = true
+		case "":
+			sawEmpty = true
+		}
+	}
+	assert.True(t, sawEast, "the ordinary partition value did not survive the round trip")
+	assert.True(t, sawEmpty, "the empty-string partition value did not survive the round trip")
+	assert.True(t, sawNull, "the null partition value did not survive the round trip as a nil MinValue")
+}
+
 // TestDelta_MetadataCarriesKernelRequiredKeys guards the two keys delta-kernel-rs refuses to read a
 // log without: metaData.format.options and a metadata object on every schemaString field. Both were
 // emitted with omitempty until T29 put DuckDB's delta_scan on the output, which failed the whole

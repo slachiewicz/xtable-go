@@ -4140,6 +4140,29 @@ Found by `test/torture_types_test.go` on 2026-08-22, whose fixtures put values o
 where translation breaks rather than in the middle where it does not. Five of these are pinned by
 skipped tests rather than asserted as correct behaviour.
 
+**Defect 2 fixed 2026-08-22.** `AddAction.PartitionValues` (and `RemoveAction.PartitionValues`,
+`cpAdd.PartitionValues` for the classic checkpoint path) is now `map[string]*string`: a nil entry
+is a genuine JSON/Parquet null, decoded as a nil `Range.MinValue`, distinct from a non-nil pointer
+to `""`. `TestTortureTypes_DeltaPartitionNullVsEmpty` is unskipped and passes, including through
+the Parquet checkpoint path (`TestCheckpoint_PartitionValueNullVsEmpty` confirms parquet-go
+round-trips a nullable map value). The Delta *write* side had the same bug in the other direction —
+`convertDataFileToAddAction` formatted a nil `MinValue` with `fmt.Sprintf("%v", ...)`, producing the
+literal string `"<nil>"` in the commit log — and is fixed the same way
+(`TestDelta_PartitionValueNullVsEmptyRoundTrip` asserts the raw JSON carries `null`, never
+`"<nil>"`). Iceberg's target already handled `nil` correctly (map[string]any flows straight to the
+Avro encoder, which has an explicit nil branch), confirming the "Iceberg does not have the problem"
+note below on both source and target sides.
+
+Two adjacent formats had the identical `"<nil>"` bug in their own partition-path formatting,
+exposed by the same fix even though neither is part of defect 2 itself: Hudi's target now writes
+`__HIVE_DEFAULT_PARTITION__` for a nil `MinValue` (the marker Java XTable's own
+`hudi.PathBasedPartitionValuesExtractor` already reads back to null), and Paimon's target folds a
+nil `MinValue` into `""`. Paimon's fold is a deliberate, documented half-measure, not a fix: Paimon's
+manifest reader is still `map[string]string`, the same JSON-collapse defect 2 fixed for Delta, and
+this reader does not know a real Paimon writer's configured `partition.default-name`, so choosing
+that marker without verifying it against a real Paimon table risked being actively wrong. Paimon's
+own null-vs-empty collapse on read remains open, alongside its unrelated defect 7 below.
+
 **1. A struct column silently discards the entire statistics blob.** The headline defect.
 `StatsJSON.NullCount` is `map[string]int64` (`pkg/formats/delta`), but delta-rs legitimately nests a
 struct column's null count as a JSON *object*. `json.Unmarshal` fails, and `convertAddAction`'s

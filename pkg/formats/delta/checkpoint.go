@@ -59,14 +59,14 @@ type cpRow struct {
 }
 
 type cpAdd struct {
-	Path             string            `parquet:"path"`
-	PartitionValues  map[string]string `parquet:"partitionValues"`
-	Size             int64             `parquet:"size"`
-	ModificationTime int64             `parquet:"modificationTime"`
-	DataChange       bool              `parquet:"dataChange"`
-	Stats            string            `parquet:"stats,optional"`
-	Tags             map[string]string `parquet:"tags,optional"`
-	DeletionVector   *cpDeletionVector `parquet:"deletionVector,optional"`
+	Path             string             `parquet:"path"`
+	PartitionValues  map[string]*string `parquet:"partitionValues"`
+	Size             int64              `parquet:"size"`
+	ModificationTime int64              `parquet:"modificationTime"`
+	DataChange       bool               `parquet:"dataChange"`
+	Stats            string             `parquet:"stats,optional"`
+	Tags             map[string]string  `parquet:"tags,optional"`
+	DeletionVector   *cpDeletionVector  `parquet:"deletionVector,optional"`
 }
 
 type cpDeletionVector struct {

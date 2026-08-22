@@ -285,15 +285,16 @@ func TestUpstream828_PartitionValueComponents(t *testing.T) {
 			name:            "every component explicitly null",
 			partitionValues: `{"year":null,"month":null,"day":null}`,
 			check: func(t *testing.T, file *model.DataFile) {
-				// Known gap, recorded under T25: AddAction.PartitionValues is map[string]string,
-				// so encoding/json turns a JSON null into "" and the reader cannot tell a null
-				// partition value from an empty one. What matters for #828 is the negative: no
-				// component is rendered as the literal "null" and nothing is joined.
+				// Fixed under T70 defect 2: AddAction.PartitionValues is map[string]*string, so a
+				// JSON null decodes as a nil *string and the reader reports a nil Range.MinValue
+				// rather than "" — distinguishable from a genuinely empty partition value. What
+				// matters for #828 is the negative: no component is rendered as the literal "null"
+				// and nothing is joined.
 				require.Len(t, file.PartitionValues, 3)
 				for _, column := range []string{"year", "month", "day"} {
 					got, ok := partitionValueFor(t, file, column)
 					require.True(t, ok)
-					assert.Equal(t, "", got, "null partition value must not become a literal")
+					assert.Nil(t, got, "null partition value must not become a literal")
 				}
 			},
 		},

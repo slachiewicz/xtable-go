@@ -53,9 +53,14 @@ type MetadataAction struct {
 }
 
 // AddAction records the addition of a new data file.
+//
+// PartitionValues is map[string]*string, not map[string]string: the Delta protocol represents a
+// null partition value as JSON null and an empty one as "", and encoding/json collapses both into
+// the zero value "" when the map's value type is a bare string. A nil entry decodes a null; a
+// non-nil pointer to "" decodes a genuine empty string. See T70 defect 2 / upstream #828.
 type AddAction struct {
 	Path             string              `json:"path"`
-	PartitionValues  map[string]string   `json:"partitionValues"`
+	PartitionValues  map[string]*string  `json:"partitionValues"`
 	Size             int64               `json:"size"`
 	ModificationTime int64               `json:"modificationTime"`
 	DataChange       bool                `json:"dataChange"`
@@ -75,12 +80,12 @@ type DeletionVectorInfo struct {
 
 // RemoveAction records the removal/compaction of a data file.
 type RemoveAction struct {
-	Path                 string            `json:"path"`
-	DeletionTimestamp    int64             `json:"deletionTimestamp,omitempty"`
-	DataChange           bool              `json:"dataChange"`
-	ExtendedFileMetadata bool              `json:"extendedFileMetadata,omitempty"`
-	PartitionValues      map[string]string `json:"partitionValues,omitempty"`
-	Size                 *int64            `json:"size,omitempty"`
+	Path                 string             `json:"path"`
+	DeletionTimestamp    int64              `json:"deletionTimestamp,omitempty"`
+	DataChange           bool               `json:"dataChange"`
+	ExtendedFileMetadata bool               `json:"extendedFileMetadata,omitempty"`
+	PartitionValues      map[string]*string `json:"partitionValues,omitempty"`
+	Size                 *int64             `json:"size,omitempty"`
 }
 
 // CommitInfoAction stores metadata describing the commit operation.

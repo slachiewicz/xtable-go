@@ -270,11 +270,21 @@ func (t *Target) writeCommitFile(ctx context.Context, version int64, actions []S
 }
 
 func (t *Target) convertDataFileToAddAction(df *model.DataFile, _ *model.Table) *AddAction {
-	partitionValues := make(map[string]string)
+	// A nil Range.MinValue is a genuine null partition value and must marshal to JSON null, not
+	// the string "<nil>" that fmt.Sprintf("%v", nil) would produce — that would corrupt the
+	// log with a fabricated value instead of writing the null this data file actually has.
+	partitionValues := make(map[string]*string)
 	for _, pv := range df.PartitionValues {
-		if pv.PartitionField != nil && pv.PartitionField.SourceField != nil && pv.Range != nil {
-			partitionValues[pv.PartitionField.SourceField.Name] = fmt.Sprintf("%v", pv.Range.MinValue)
+		if pv.PartitionField == nil || pv.PartitionField.SourceField == nil || pv.Range == nil {
+			continue
 		}
+		name := pv.PartitionField.SourceField.Name
+		if pv.Range.MinValue == nil {
+			partitionValues[name] = nil
+			continue
+		}
+		value := fmt.Sprintf("%v", pv.Range.MinValue)
+		partitionValues[name] = &value
 	}
 
 	stats := StatsJSON{
