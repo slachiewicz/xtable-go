@@ -247,6 +247,7 @@ Step-by-step guides:
 - ❄️ [Snowflake Horizon Catalog](docs/snowflake.md) — Apache Polaris under the hood, a token-exchange auth flow with no client id, and why table data can't be read yet
 - 🔍 [Query a synced table](docs/query-engines.md) — DuckDB (verified), Spark, Trino, Athena, Redshift, BigQuery, Snowflake, StarRocks, Fabric
 - ⚖️ [Features and limitations](docs/features-and-limitations.md) — the honest capability reference and known issues
+- 🧩 [Interoperability coverage](docs/interoperability-coverage.md) — the five axes of interoperability, a verified-by matrix, and defects only a foreign reader ever caught
 - 🧪 [How polytable is tested](docs/testing.md) — foreign fixtures, engine verification, and the coverage bar
 - 🗺️ [Roadmap](docs/roadmap.md) — direction, positioned against the upstream release train
 - 🔭 [Upstream watch](docs/upstream-watch.md) — dated knowledge base of Java XTable's plans, bugs, and roadmap

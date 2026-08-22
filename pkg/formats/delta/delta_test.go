@@ -276,3 +276,53 @@ func TestDelta_DeletionVectors(t *testing.T) {
 	assert.Equal(t, int64(32), readDF.DeletionVector.SizeInBytes)
 	assert.Equal(t, int64(5), readDF.DeletionVector.Cardinality)
 }
+
+// TestDelta_AbsoluteAddPathSchemesAreNotJoined pins a defect found by checking polytable against a
+// defect class the upstream Apache XTable session identified in DeltaActionsConverter.
+//
+// The Delta protocol permits an absolute add.path for externally-referenced files and shallow
+// clones. resolveDataPath tested a hand-written subset of schemes -- s3, gs, mem, file -- and so
+// mistook an absolute s3a://, abfss://, abfs://, wasbs:// or wasb:// path for a relative one and
+// joined it onto the table root. Hadoop and Spark write s3a://, so this was reachable through the
+// most widely used Delta writer there is.
+func TestDelta_AbsoluteAddPathSchemesAreNotJoined(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	const base = "mem://lake/abs_paths"
+	// Every scheme polytable recognises must be treated as already absolute.
+	absolute := []string{
+		"s3://other/data/f.parquet",
+		"s3a://other/data/f.parquet",
+		"gs://other/data/f.parquet",
+		"abfss://c@a.dfs.core.windows.net/data/f.parquet",
+		"abfs://c@a.dfs.core.windows.net/data/f.parquet",
+		"wasbs://c@a.blob.core.windows.net/data/f.parquet",
+		"wasb://c@a.blob.core.windows.net/data/f.parquet",
+		"file:///tmp/data/f.parquet",
+	}
+
+	memStorage := io.NewMemoryStorage()
+	var log strings.Builder
+	log.WriteString(`{"protocol":{"minReaderVersion":1,"minWriterVersion":2}}` + "\n")
+	log.WriteString(`{"metaData":{"id":"t","format":{"provider":"parquet","options":{}},` +
+		`"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}}]}",` +
+		`"partitionColumns":[],"configuration":{},"createdTime":1}}` + "\n")
+	for _, p := range absolute {
+		log.WriteString(`{"add":{"path":"` + p + `","partitionValues":{},"size":1,"modificationTime":1,"dataChange":true}}` + "\n")
+	}
+	require.NoError(t, memStorage.Write(ctx, io.JoinPath(base, "_delta_log", "00000000000000000000.json"), []byte(log.String())))
+
+	src := delta.NewSource(memStorage, base)
+	snap, err := src.GetCurrentSnapshot(ctx)
+	require.NoError(t, err)
+	require.Len(t, snap.DataFiles, len(absolute))
+
+	got := make([]string, 0, len(snap.DataFiles))
+	for _, df := range snap.DataFiles {
+		got = append(got, df.PhysicalPath)
+		assert.NotContains(t, df.PhysicalPath, base+"/",
+			"an absolute path must not be joined onto the table root")
+	}
+	assert.ElementsMatch(t, absolute, got)
+}

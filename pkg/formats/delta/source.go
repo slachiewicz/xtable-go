@@ -552,7 +552,18 @@ func (s *Source) convertAddAction(add *AddAction, table *model.Table) *model.Dat
 }
 
 func (s *Source) resolveDataPath(relPath string) string {
-	if strings.HasPrefix(relPath, "s3://") || strings.HasPrefix(relPath, "gs://") || strings.HasPrefix(relPath, "mem://") || strings.HasPrefix(relPath, "file://") || strings.HasPrefix(relPath, "/") {
+	// Ask the canonical parser rather than testing a hand-written subset of schemes. The list here
+	// was missing s3a://, abfss://, abfs://, wasbs:// and wasb:// -- five of the nine polytable
+	// recognises -- so an absolute add.path carrying any of them was mistaken for a relative one
+	// and joined onto the table root, producing a path like
+	// "s3://bucket/tbl/s3a://bucket/tbl/data/f.parquet". Silent, and no reader can resolve it.
+	//
+	// Reachable through the most common writer there is: Hadoop and Spark write s3a://, and the
+	// Delta protocol permits an absolute add.path for externally-referenced files and shallow
+	// clones. The same defect exists in Apache XTable's DeltaActionsConverter.getFullPathToFile,
+	// which concatenates on a startsWith test; the class was pointed out by the session working on
+	// it, and checking polytable found this.
+	if scheme, _ := io.TrimScheme(relPath); scheme != "" || strings.HasPrefix(relPath, "/") {
 		return relPath
 	}
 	return io.JoinPath(s.basePath, relPath)
