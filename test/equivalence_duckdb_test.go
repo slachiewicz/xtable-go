@@ -95,6 +95,15 @@ func TestEquivalence_DuckDBCrossEngine(t *testing.T) {
 	cases := []equivalenceCase{
 		{name: "delta_rs_to_iceberg", fixture: "delta-rs", source: model.TableFormatDelta, target: model.TableFormatIceberg},
 		{name: "delta_rs_checkpoint_to_iceberg", fixture: "delta-rs-checkpoint", source: model.TableFormatDelta, target: model.TableFormatIceberg},
+		// This case is a known, real failure, not a harness bug: delta-rs-compaction is the one
+		// unpartitioned fixture in the tree, and polytable's Iceberg target leaves the Go slice
+		// backing PartitionSpec.Fields nil rather than empty when there are no partition columns
+		// (pkg/formats/iceberg/target.go, the `partitionFieldDefs` accumulator). encoding/json
+		// marshals a nil slice as `"fields":null`, and DuckDB's iceberg extension refuses that
+		// metadata.json outright ("PartitionSpec property 'fields' is not of type 'array', found
+		// 'null' instead") rather than treating it as an empty spec. It is the same class of bug
+		// as the historical `partitionColumns: null` defect this harness was built to catch, just
+		// on the write side. Left failing deliberately: fixing pkg/ is another agent's task.
 		{name: "delta_rs_compaction_to_iceberg", fixture: "delta-rs-compaction", source: model.TableFormatDelta, target: model.TableFormatIceberg},
 		{name: "delta_rs_deletes_to_iceberg", fixture: "delta-rs-deletes", source: model.TableFormatDelta, target: model.TableFormatIceberg},
 		{name: "pyiceberg_to_delta", fixture: "pyiceberg", source: model.TableFormatIceberg, target: model.TableFormatDelta},

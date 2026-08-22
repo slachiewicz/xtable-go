@@ -222,3 +222,51 @@ func TestRelativizePath_DifferentAccountStillRefused(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, io.ErrPathNotUnderBase)
 }
+
+// TestRelativizePath_SchemeAliasesAcrossBackends records what each backend's alias pairs actually
+// do, after the Azure blob/dfs case turned out to be a real defect. Two of these were already
+// correct and one was silently wrong, which is why the table is written as a record rather than
+// only covering the fix.
+func TestRelativizePath_SchemeAliasesAcrossBackends(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		file    string
+		base    string
+		want    string
+		wantErr error
+	}{
+		// Already correct: both spellings are in uriSchemes, so TrimScheme strips either. This is
+		// the pair that matters most in practice, since Hadoop and Spark write s3a:// while the AWS
+		// tooling writes s3://, so a Java-written table read against an s3:// base lands here.
+		{name: "s3a file under an s3 base", file: "s3a://b/tbl/data/f.parquet", base: "s3://b/tbl", want: "data/f.parquet"},
+		{name: "s3 file under an s3a base", file: "s3://b/tbl/data/f.parquet", base: "s3a://b/tbl", want: "data/f.parquet"},
+		{name: "wasbs file under an abfss base", file: "wasbs://c@a.blob.core.windows.net/tbl/data/f.parquet", base: "abfss://c@a.dfs.core.windows.net/tbl", want: "data/f.parquet"},
+
+		// Silently wrong before this was fixed. An unrecognised scheme was mistaken for a relative
+		// path, and path.Clean had already collapsed the "//", so "gcs://b/tbl/data/f.parquet" was
+		// returned as the relative path "gcs:/b/tbl/data/f.parquet" -- neither relative nor a URI,
+		// and undetectable downstream. Snowflake writes external volume locations as "gcs://", so
+		// this was reachable, not theoretical.
+		{name: "gcs scheme is refused, not mangled", file: "gcs://b/tbl/data/f.parquet", base: "gs://b/tbl", wantErr: io.ErrInvalidPath},
+		{name: "an https object URL is refused, not mangled", file: "https://storage.googleapis.com/b/tbl/data/f.parquet", base: "gs://b/tbl", wantErr: io.ErrInvalidPath},
+		{name: "an s3 virtual-hosted URL is refused, not mangled", file: "https://b.s3.eu-north-1.amazonaws.com/tbl/data/f.parquet", base: "s3://b/tbl", wantErr: io.ErrInvalidPath},
+
+		// A genuinely relative path must still pass through untouched.
+		{name: "a relative path is unaffected", file: "data/f.parquet", base: "s3://b/tbl", want: "data/f.parquet"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := io.RelativizePath(tc.file, tc.base)
+			if tc.wantErr != nil {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

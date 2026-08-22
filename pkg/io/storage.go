@@ -152,6 +152,18 @@ func RelativizePath(physicalPath, basePath string) (string, error) {
 	base = path.Clean(base)
 	file = path.Clean(file)
 
+	// A path carrying a scheme this package does not recognise must be refused, not mistaken for a
+	// relative one. TrimScheme reports no scheme for an unknown spelling, and the branch below then
+	// returns the whole thing verbatim as though it were relative -- after path.Clean has collapsed
+	// the "//" -- so "gcs://b/t/f.parquet" becomes the relative path "gcs:/b/t/f.parquet". That is
+	// neither relative nor a valid URI, and nothing downstream can detect it. Reachable in
+	// practice: Snowflake writes external volume locations as "gcs://", and object stores are
+	// commonly addressed as "https://<bucket>.s3.<region>.amazonaws.com/..." too.
+	if scheme == "" && strings.Contains(physicalPath, "://") {
+		return "", fmt.Errorf("%w: %q carries a scheme this package does not recognise; recognised schemes are %s",
+			ErrInvalidPath, physicalPath, strings.Join(uriSchemes, ", "))
+	}
+
 	// model.DataFile documents PhysicalPath as a fully qualified URI or a relative path. Carrying no
 	// scheme and not starting at the root is what makes it the second kind, and such a path is
 	// already relative to the table — with the exception of one that climbs out of it.

@@ -3993,9 +3993,32 @@ the OneLake pair that `pkg/io/azure.go` already documents.
 **Verified end to end afterwards**: DuckDB reads 8 rows / sum 40.0 / 4 regions and delta-rs reads the
 same, matching what Snowflake reports for the source table.
 
-**Left open deliberately**: the equivalent aliases for other backends — S3 virtual-hosted versus
-path-style, and `gs://` versus `storage.googleapis.com` — are **untested**, and the acceptance
-criterion above asked for them to be covered or recorded. They are recorded, not covered.
+**The other backends were then tested too, and one was worse.** Each alias pair was run through
+`RelativizePath` directly:
+
+| Pair | Before |
+| :--- | :--- |
+| `s3a://` file under an `s3://` base, and the reverse | Already correct — both are in `uriSchemes` |
+| `wasbs://` file under an `abfss://` base | Already correct |
+| `gcs://` file under a `gs://` base | **Silently mangled** |
+| `https://storage.googleapis.com/...`, `https://<bucket>.s3.<region>.amazonaws.com/...` | **Silently mangled** |
+
+The `s3`/`s3a` result matters most in practice: Hadoop and Spark write `s3a://` while AWS tooling
+writes `s3://`, so a Java-written table read against an `s3://` base lands there, and it works.
+
+The mangling is worse than the Azure defect this task started from. `TrimScheme` reports no scheme
+for a spelling it does not know, and the "no scheme means already relative" branch then returned the
+whole string — after `path.Clean` had collapsed the `//` — so `gcs://b/t/f.parquet` came back as the
+*relative path* `gcs:/b/t/f.parquet`. Azure at least produced a valid absolute URI that a reader
+could fail on loudly; this is neither relative nor a URI, and nothing downstream can detect it.
+
+**Reachable, not theoretical**: Snowflake writes external volume locations as `gcs://`. The GCS chain
+verified above escaped only because Snowflake normalised it to `gs://` in the Iceberg metadata it
+then wrote.
+
+An unrecognised scheme is now **refused** rather than mistaken for a relative path, and every pair
+above is pinned in `TestRelativizePath_SchemeAliasesAcrossBackends` — including the two that were
+already correct, so the table reads as a record rather than only covering the fix.
 
 **Commit:** `fix: treat dfs and blob endpoints as one store when relativizing`
 
