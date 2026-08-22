@@ -1,0 +1,53 @@
+{
+  "format": "ICEBERG",
+  "table_name": "orders",
+  "table_dir": "orders",
+  "writer": {
+    "vendor": "Snowflake",
+    "product": "Snowflake-managed Iceberg table on an external volume"
+  },
+  "path_placeholder": "file:///__POLYTABLE_FIXTURE_ROOT__",
+  "format_version": 2,
+  "total_rows": 8,
+  "data_file_count": 1,
+  "sum_amount": 40.0,
+  "distinct_regions": 4,
+  "schema": [
+    {
+      "name": "ID",
+      "type": "int",
+      "nullable": true,
+      "field_id": 1
+    },
+    {
+      "name": "AMOUNT",
+      "type": "double",
+      "nullable": true,
+      "field_id": 2
+    },
+    {
+      "name": "REGION",
+      "type": "string",
+      "nullable": true,
+      "field_id": 3
+    }
+  ],
+  "provenance": [
+    "Written by a real Snowflake account on 2026-08-22 via CREATE ICEBERG TABLE on an external",
+    "volume backed by Azure ADLS Gen2. polytable has never written into this directory.",
+    "Rescued to local disk minutes before the Azure account was deleted; it cannot be",
+    "regenerated without another Snowflake instance and an external volume."
+  ],
+  "notes": [
+    "This is the only fixture here written by a commercial engine. Every other fixture comes",
+    "from delta-rs or pyiceberg, which is the writer-axis gap docs/interoperability-coverage.md",
+    "records.",
+    "Snowflake writes NO version-hint.text, so a reader that refuses to guess (DuckDB by",
+    "default) will not open it without unsafe_enable_version_guessing.",
+    "Metadata file names are 00000-<uuid>.metadata.json, not v1.metadata.json.",
+    "Column names are UPPER CASE, as Snowflake writes them.",
+    "Absolute locations in the JSON metadata are rewritten to path_placeholder, following the",
+    "convention in test/fixtures/generate.py. Paths inside the Avro manifests are the original",
+    "abfss:// ones and are NOT relocatable, exactly as for the pyiceberg fixtures."
+  ]
+}
