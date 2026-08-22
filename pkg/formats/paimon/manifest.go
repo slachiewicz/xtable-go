@@ -181,6 +181,17 @@ func partitionMap(file *model.DataFile) map[string]string {
 		if pv == nil || pv.PartitionField == nil || pv.PartitionField.SourceField == nil || pv.Range == nil {
 			continue
 		}
+		// A nil MinValue is a genuine null partition value (T70 defect 2), not the string "<nil>"
+		// that fmt.Sprintf("%v", nil) would fabricate. Paimon's own default-partition marker is
+		// configurable (partition.default-name) and this manifest reader does not read that
+		// config, so this format already cannot distinguish null from an empty partition value on
+		// read (entry.Partition is map[string]string) — folding a null into "" here is consistent
+		// with that existing limitation rather than inventing a marker this reader would not
+		// recognise. See T70's report for the residual gap.
+		if pv.Range.MinValue == nil {
+			values[pv.PartitionField.SourceField.Name] = ""
+			continue
+		}
 		values[pv.PartitionField.SourceField.Name] = fmt.Sprintf("%v", pv.Range.MinValue)
 	}
 	if len(values) == 0 {

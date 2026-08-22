@@ -32,6 +32,10 @@ import (
 	"github.com/slachiewicz/polytable/pkg/spi"
 )
 
+// hiveDefaultPartition is the directory-name convention Hive, Spark and Java XTable's own
+// hudi.PathBasedPartitionValuesExtractor use for a null partition value.
+const hiveDefaultPartition = "__HIVE_DEFAULT_PARTITION__"
+
 // Target implements spi.ConversionTarget for Apache Hudi tables.
 type Target struct {
 	storage     io.Storage
@@ -137,7 +141,16 @@ func (t *Target) CommitSnapshot(ctx context.Context, snapshot *model.Snapshot) e
 	for _, df := range snapshot.AllDataFiles() {
 		partPath := ""
 		if len(df.PartitionValues) > 0 && df.PartitionValues[0].Range != nil {
-			partPath = fmt.Sprintf("%v", df.PartitionValues[0].Range.MinValue)
+			if df.PartitionValues[0].Range.MinValue == nil {
+				// A nil MinValue is a genuine null partition value (T70 defect 2), not the string
+				// "<nil>" that fmt.Sprintf("%v", nil) would otherwise fabricate. hiveDefaultPartition
+				// is the marker Java XTable's own PathBasedPartitionValuesExtractor reads back to
+				// null, so a foreign Hive/Spark-compatible reader of this Hudi table sees the same
+				// convention it already expects.
+				partPath = hiveDefaultPartition
+			} else {
+				partPath = fmt.Sprintf("%v", df.PartitionValues[0].Range.MinValue)
+			}
 		}
 
 		// A write stat's path is relative to the base path, and the Hudi source joins it back onto

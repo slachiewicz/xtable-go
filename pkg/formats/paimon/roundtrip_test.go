@@ -183,6 +183,56 @@ func TestPaimon_TargetOutputIsReadableBySource(t *testing.T) {
 	}
 }
 
+// TestPaimon_NullPartitionValueDoesNotBecomeLiteralNil is the write-side guard adjacent to T70
+// defect 2: a nil Range.MinValue must never be formatted as the literal string "<nil>" in the
+// manifest. Paimon's own manifest is map[string]string on read (the same JSON-collapse limitation
+// Delta had before the fix) and this reader does not know the writer's configured
+// partition-default-name, so a null partition value here deliberately folds into the same "" a
+// genuinely empty partition value produces, rather than fabricating an unrecognisable marker.
+func TestPaimon_NullPartitionValueDoesNotBecomeLiteralNil(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	storage := io.NewMemoryStorage()
+	basePath := "mem://lake/null_partition"
+	table := paimonRoundTripTable(basePath, true)
+
+	regionField := &model.PartitionField{
+		SourceField:   &model.Field{Name: "region", Schema: model.NewPrimitiveSchema(model.TypeString, false)},
+		TransformType: model.PartitionTransformValue,
+	}
+	file := &model.DataFile{
+		PhysicalPath:  io.JoinPath(basePath, "region=__DEFAULT_PARTITION__/part-0.parquet"),
+		FileFormat:    model.FileFormatParquet,
+		FileSizeBytes: 1024,
+		RecordCount:   3,
+		PartitionValues: []*model.PartitionValue{{
+			PartitionField: regionField,
+			Range:          model.NewScalarRange(nil),
+		}},
+	}
+
+	target := paimon.NewTarget(storage)
+	require.NoError(t, target.Init(ctx, table))
+	t.Cleanup(func() { _ = target.Close() })
+	require.NoError(t, target.CommitSnapshot(ctx, &model.Snapshot{
+		Table:            table,
+		DataFiles:        []*model.DataFile{file},
+		SourceIdentifier: "1",
+	}))
+
+	source := paimon.NewSource(storage, basePath)
+	t.Cleanup(func() { _ = source.Close() })
+	readBack, err := source.GetCurrentSnapshot(ctx)
+	require.NoError(t, err)
+	require.Len(t, readBack.DataFiles, 1)
+	require.Len(t, readBack.DataFiles[0].PartitionValues, 1)
+
+	value := readBack.DataFiles[0].PartitionValues[0].Range.MinValue
+	assert.NotEqual(t, "<nil>", value, "a null partition value must never be formatted as the literal \"<nil>\"")
+	assert.Equal(t, "", value)
+}
+
 // TestPaimon_IncrementalCommitsAccumulate checks that each incremental commit lands as its own
 // snapshot and that the newest snapshot still describes the whole table.
 func TestPaimon_IncrementalCommitsAccumulate(t *testing.T) {

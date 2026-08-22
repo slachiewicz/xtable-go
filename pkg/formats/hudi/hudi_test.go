@@ -172,6 +172,61 @@ func TestHudi_SnapshotCommitAndRead(t *testing.T) {
 	assert.Contains(t, meta.CustomProperties, model.KeyXTableMetadata)
 }
 
+// TestHudi_NullPartitionValueDoesNotBecomeLiteralNil is the write-side guard adjacent to T70
+// defect 2: a nil Range.MinValue (a genuine null partition value) must become the
+// __HIVE_DEFAULT_PARTITION__ marker Java XTable's own hudi.PathBasedPartitionValuesExtractor reads
+// back to null, never the literal string "<nil>" that fmt.Sprintf("%v", nil) would fabricate.
+func TestHudi_NullPartitionValueDoesNotBecomeLiteralNil(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	memStorage := io.NewMemoryStorage()
+	basePath := "mem://lake/hudi_null_partition"
+
+	regionField := &model.Field{Name: "region", Schema: model.NewPrimitiveSchema(model.TypeString, true)}
+	schema := model.NewRecordSchema("events", []*model.Field{regionField}, false)
+	partField := &model.PartitionField{SourceField: regionField, TransformType: model.PartitionTransformValue}
+
+	table := &model.Table{
+		Name:               "events",
+		TableFormat:        model.TableFormatHudi,
+		ReadSchema:         schema,
+		BasePath:           basePath,
+		PartitioningFields: []*model.PartitionField{partField},
+		LatestCommitTime:   time.Now().UnixMilli(),
+	}
+
+	dataFile := &model.DataFile{
+		PhysicalPath:  "mem://lake/hudi_null_partition/region=__HIVE_DEFAULT_PARTITION__/part-0.parquet",
+		FileFormat:    model.FileFormatParquet,
+		FileSizeBytes: 100,
+		RecordCount:   1,
+		PartitionValues: []*model.PartitionValue{
+			{PartitionField: partField, Range: model.NewScalarRange(nil)},
+		},
+		LastModified: time.Now().UnixMilli(),
+	}
+
+	target := hudi.NewTarget(memStorage)
+	require.NoError(t, target.Init(ctx, table))
+	require.NoError(t, target.CommitSnapshot(ctx, &model.Snapshot{
+		Table:            table,
+		DataFiles:        []*model.DataFile{dataFile},
+		SourceIdentifier: "1",
+	}))
+
+	source := hudi.NewSource(memStorage, basePath)
+	instants, err := source.ListCompletedCommits(ctx)
+	require.NoError(t, err)
+	require.Len(t, instants, 1)
+
+	commitPath := io.JoinPath(basePath, ".hoodie", instants[0].FileName)
+	raw, err := memStorage.Read(ctx, commitPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "__HIVE_DEFAULT_PARTITION__")
+	assert.NotContains(t, string(raw), "<nil>")
+}
+
 func TestHudi_CrossFormatSync(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

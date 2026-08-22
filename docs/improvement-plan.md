@@ -4158,6 +4158,7 @@ above `last-column-id`; a dropped and re-added column does not silently inherit 
 ---
 
 ## T70 — Seven type-translation defects, six of them silent ⚠️ 2 OF 7 FIXED (items 1 and 6)
+## T70 — Seven type-translation defects, six of them silent
 
 Found by `test/torture_types_test.go` on 2026-08-22, whose fixtures put values on the boundaries
 where translation breaks rather than in the middle where it does not. Five of these are pinned by
@@ -4195,6 +4196,34 @@ Tests: `pkg/formats/delta/stats_nesting_test.go` (`TestDelta_NestedStructStatsFl
 write is defect 4, separately open.
 
 **Commit:** `fix: parse nested Delta stats and recognize Hudi's own TIMESTAMP_NTZ logical type`
+**Defect 2 fixed 2026-08-22.** `AddAction.PartitionValues` (and `RemoveAction.PartitionValues`,
+`cpAdd.PartitionValues` for the classic checkpoint path) is now `map[string]*string`: a nil entry
+is a genuine JSON/Parquet null, decoded as a nil `Range.MinValue`, distinct from a non-nil pointer
+to `""`. `TestTortureTypes_DeltaPartitionNullVsEmpty` is unskipped and passes, including through
+the Parquet checkpoint path (`TestCheckpoint_PartitionValueNullVsEmpty` confirms parquet-go
+round-trips a nullable map value). The Delta *write* side had the same bug in the other direction —
+`convertDataFileToAddAction` formatted a nil `MinValue` with `fmt.Sprintf("%v", ...)`, producing the
+literal string `"<nil>"` in the commit log — and is fixed the same way
+(`TestDelta_PartitionValueNullVsEmptyRoundTrip` asserts the raw JSON carries `null`, never
+`"<nil>"`). Iceberg's target already handled `nil` correctly (map[string]any flows straight to the
+Avro encoder, which has an explicit nil branch), confirming the "Iceberg does not have the problem"
+note below on both source and target sides.
+
+Two adjacent formats had the identical `"<nil>"` bug in their own partition-path formatting,
+exposed by the same fix even though neither is part of defect 2 itself: Hudi's target now writes
+`__HIVE_DEFAULT_PARTITION__` for a nil `MinValue` (the marker Java XTable's own
+`hudi.PathBasedPartitionValuesExtractor` already reads back to null), and Paimon's target folds a
+nil `MinValue` into `""`. Paimon's fold is a deliberate, documented half-measure, not a fix: Paimon's
+manifest reader is still `map[string]string`, the same JSON-collapse defect 2 fixed for Delta, and
+this reader does not know a real Paimon writer's configured `partition.default-name`, so choosing
+that marker without verifying it against a real Paimon table risked being actively wrong. Paimon's
+own null-vs-empty collapse on read remains open, alongside its unrelated defect 7 below.
+
+**1. A struct column silently discards the entire statistics blob.** The headline defect.
+`StatsJSON.NullCount` is `map[string]int64` (`pkg/formats/delta`), but delta-rs legitimately nests a
+struct column's null count as a JSON *object*. `json.Unmarshal` fails, and `convertAddAction`'s
+`if err == nil` then drops **all** stats — `RecordCount` and every column's bounds, not just the
+struct's — with nothing surfaced. Any Delta table containing a struct loses its record counts.
 
 **2. A null partition value is indistinguishable from an empty one.**
 `AddAction.PartitionValues` is `map[string]string`, so JSON `null` and `""` both decode to `""`.
@@ -4246,6 +4275,13 @@ rather than becoming `STRING`.
 
 **Still unverified against any Paimon engine** — that has not changed, and the closest substitute is
 a fixture hand-derived from `DataTypeJsonParser`'s rules rather than from this package's own writer.
+**6. Hudi's writer and its own reader disagree.** The writer emits the Avro logical type
+`local-timestamp-micros` for `TIMESTAMP_NTZ`; its reader has no case for it and narrows to `STRING`.
+A self-inconsistent round trip, which is the one class a self-test *should* have caught.
+
+**7. Paimon narrows structures and zone-awareness.** `modelTypeToPaimonType` has no `TypeRecord`
+case; `parsePaimonType` cannot parse `ARRAY<` or `MAP<`, so it narrows on read even where the write
+was right; and `TIMESTAMP` and `TIMESTAMP_NTZ` both collapse to `TIMESTAMP(6)`.
 
 **Not defects, recorded so they are not re-investigated.** Iceberg `UUID` → Delta `STRING` is an
 explicit, defensible mapping rather than the default fallback. The Parquet schema reader *correctly*
@@ -4261,6 +4297,9 @@ and silently truncates to microseconds.
 because a format disagreeing with itself needs no foreign reader to be wrong. **Both done.** Then (2),
 which has an upstream issue to match against. (3), (4) and (5) are narrower and share the
 `DecodeBound` seam, so they are one change.
+because a format disagreeing with itself needs no foreign reader to be wrong. Then (2), which has an
+upstream issue to match against. (3), (4) and (5) are narrower and share the `DecodeBound` seam, so
+they are one change.
 
 **Acceptance:** each skipped test in `test/torture_types_test.go` is unskipped and passes, or is
 recorded here as a genuine format limitation with the reason.

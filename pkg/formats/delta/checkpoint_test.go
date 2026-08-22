@@ -49,11 +49,11 @@ type testFormat struct {
 }
 
 type testCheckpointAdd struct {
-	Path             string            `parquet:"path"`
-	PartitionValues  map[string]string `parquet:"partitionValues"`
-	Size             int64             `parquet:"size"`
-	ModificationTime int64             `parquet:"modificationTime"`
-	DataChange       bool              `parquet:"dataChange"`
+	Path             string             `parquet:"path"`
+	PartitionValues  map[string]*string `parquet:"partitionValues"`
+	Size             int64              `parquet:"size"`
+	ModificationTime int64              `parquet:"modificationTime"`
+	DataChange       bool               `parquet:"dataChange"`
 }
 
 type testCheckpointSidecar struct {
@@ -86,7 +86,7 @@ func metaRow() testCheckpointRow {
 
 func addRow(path string) testCheckpointRow {
 	return testCheckpointRow{Add: &testCheckpointAdd{
-		Path: path, PartitionValues: map[string]string{}, Size: 1, ModificationTime: 1, DataChange: true,
+		Path: path, PartitionValues: map[string]*string{}, Size: 1, ModificationTime: 1, DataChange: true,
 	}}
 }
 
@@ -128,4 +128,60 @@ func TestCheckpoint_MultiPart(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, snapshot.DataFiles, 2)
 	assert.Equal(t, "1", snapshot.SourceIdentifier)
+}
+
+// TestCheckpoint_PartitionValueNullVsEmpty is the classic Parquet checkpoint counterpart of T70
+// defect 2: a partitionValues map entry can be a genuine Parquet null (this fixture's "north"
+// file) or the empty string (its "south" file), and parquet-go must round-trip the distinction
+// through cpAdd's map[string]*string the same way encoding/json does for the JSON commit log.
+func TestCheckpoint_PartitionValueNullVsEmpty(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	storage := io.NewMemoryStorage()
+	base := "mem://checkpoint-partition-null"
+
+	const partitionedSchema = `{"type":"struct","fields":[` +
+		`{"name":"id","type":"long","nullable":false,"metadata":{}},` +
+		`{"name":"region","type":"string","nullable":true,"metadata":{}}]}`
+
+	empty := ""
+	meta := testCheckpointRow{MetaData: &testCheckpointMeta{
+		ID:               "0000",
+		Format:           testFormat{Provider: "parquet", Options: map[string]string{}},
+		SchemaString:     partitionedSchema,
+		PartitionColumns: []string{"region"},
+	}}
+	nullRow := testCheckpointRow{Add: &testCheckpointAdd{
+		Path:            "region=__HIVE_DEFAULT_PARTITION__/part-north.parquet",
+		PartitionValues: map[string]*string{"region": nil},
+		Size:            1, ModificationTime: 1, DataChange: true,
+	}}
+	emptyRow := testCheckpointRow{Add: &testCheckpointAdd{
+		Path:            "region=/part-south.parquet",
+		PartitionValues: map[string]*string{"region": &empty},
+		Size:            1, ModificationTime: 1, DataChange: true,
+	}}
+
+	logDir := base + "/_delta_log"
+	writeParquetRows(t, storage, fmt.Sprintf("%s/%020d.checkpoint.parquet", logDir, 0),
+		[]testCheckpointRow{meta, nullRow, emptyRow})
+	require.NoError(t, storage.Write(ctx, logDir+"/_last_checkpoint",
+		[]byte(`{"version":0,"size":3}`)))
+
+	snapshot, err := delta.NewSource(storage, base).GetCurrentSnapshot(ctx)
+	require.NoError(t, err)
+	require.Len(t, snapshot.DataFiles, 2)
+
+	var sawNull, sawEmpty bool
+	for _, file := range snapshot.DataFiles {
+		require.Len(t, file.PartitionValues, 1)
+		switch file.PartitionValues[0].Range.MinValue {
+		case nil:
+			sawNull = true
+		case "":
+			sawEmpty = true
+		}
+	}
+	assert.True(t, sawNull, "no data file reported a nil (null) partition value from the checkpoint")
+	assert.True(t, sawEmpty, "no data file reported an empty-string partition value from the checkpoint")
 }

@@ -367,21 +367,14 @@ func TestTortureTypes_DeltaPartitionNullVsEmpty(t *testing.T) {
 	}
 
 	t.Run("null_distinct_from_empty_string", func(t *testing.T) {
-		t.Skip("known defect: pkg/formats/delta AddAction.PartitionValues is map[string]string, so " +
-			"encoding/json decodes both a JSON null partition value and a genuine empty string to " +
-			"\"\" — the null-partition (__HIVE_DEFAULT_PARTITION__) and empty-string (region=) rows " +
-			"of this fixture are not distinguishable after the read. See #828 in the task notes; " +
-			"pkg/formats/delta is out of scope for this change.")
-
 		var sawNull, sawEmpty bool
 		for _, file := range snapshot.DataFiles {
-			value, _ := file.PartitionValues[0].Range.MinValue.(string)
-			if value == "" {
+			value, ok := file.PartitionValues[0].Range.MinValue.(string)
+			if ok && value == "" {
 				sawEmpty = true
 			}
 		}
-		// Once fixed, a null partition value should decode as a nil Range.MinValue (or some other
-		// explicit not-a-string marker) rather than "".
+		// A null partition value decodes as a nil Range.MinValue rather than "".
 		for _, file := range snapshot.DataFiles {
 			if file.PartitionValues[0].Range.MinValue == nil {
 				sawNull = true
