@@ -4228,9 +4228,24 @@ subtest, renamed from `timestamp_ntz_narrowed_to_string` (which pinned the defec
 
 **Commit:** see item 1's — landed in the same commit as this item.
 
-**7. Paimon narrows structures and zone-awareness.** `modelTypeToPaimonType` has no `TypeRecord`
-case; `parsePaimonType` cannot parse `ARRAY<` or `MAP<`, so it narrows on read even where the write
-was right; and `TIMESTAMP` and `TIMESTAMP_NTZ` both collapse to `TIMESTAMP(6)`.
+**7. Paimon narrows structures and zone-awareness.** ✅ **Fixed, and the defect was worse than
+filed.** The original entry assumed a flat `ROW<...>` string dialect was right and only unparsed.
+Reading Paimon's own source (`paimon-bundle:1.3.1-sources`, `DataTypeJsonParser`) showed that
+`RowType`, `ArrayType` and `MapType` override `serializeJson` to emit a JSON **object** with a
+`type` discriminator plus `fields`/`element`/`key`/`value`, and that `parseTypeByKeyword` has **no
+`ROW`, `ARRAY` or `MAP` case at all**. So a flat string is a dialect **Paimon's own parser cannot
+read** — polytable's nested Paimon output was structurally unreadable, not merely narrowed.
+
+`DataField.Type` is now a JSON-shaped type reproducing that structure. A second defect surfaced with
+it: `RowType#collectFieldIds` throws on a duplicate id **anywhere in the tree**, so ids must be
+unique across nesting rather than per level; one shared counter now threads through the conversion.
+
+`TIMESTAMP` and `TIMESTAMP_NTZ` are distinguished, with precision bucketed as
+`PaimonSchemaExtractor` does upstream. Unsupported types now fail with `ErrUnsupportedPaimonType`
+rather than becoming `STRING`.
+
+**Still unverified against any Paimon engine** — that has not changed, and the closest substitute is
+a fixture hand-derived from `DataTypeJsonParser`'s rules rather than from this package's own writer.
 
 **Not defects, recorded so they are not re-investigated.** Iceberg `UUID` → Delta `STRING` is an
 explicit, defensible mapping rather than the default fallback. The Parquet schema reader *correctly*
