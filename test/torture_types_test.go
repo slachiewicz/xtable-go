@@ -237,17 +237,20 @@ func TestTortureTypes_DeltaSchema(t *testing.T) {
 
 // TestTortureTypes_DeltaColumnBounds checks the per-column bounds delta-rs itself recorded in the
 // commit's stats JSON survive a polytable read unchanged. It found something more severe than the
-// per-column precision loss it went looking for: pkg/formats/delta's StatsJSON.NullCount is declared
+// per-column precision loss it went looking for: pkg/formats/delta's StatsJSON.NullCount was declared
 // `map[string]int64`, but delta-rs legitimately writes a *nested* null count for a struct column
 // (this fixture's own commit carries `"nullCount":{"struct1":{"inner_a":2,"inner_struct":{"deep":2}},
-// ...}`). json.Unmarshal(add.Stats, &stats) therefore fails with a type-mismatch error for the whole
-// stats blob, and convertAddAction's `if err == nil` silently discards not just struct1's null count
+// ...}`). json.Unmarshal(add.Stats, &stats) therefore failed with a type-mismatch error for the whole
+// stats blob, and convertAddAction's `if err == nil` silently discarded not just struct1's null count
 // but the file's RecordCount and every other column's min/max/null-count too — one nested field
-// poisons every column's statistics, with no error surfaced anywhere in GetCurrentSnapshot's result.
+// poisoned every column's statistics, with no error surfaced anywhere in GetCurrentSnapshot's result.
 //
-// This is demonstrated directly below, not hypothesized, and is a materially worse finding than the
-// decimal-precision-loss question this test set out to check: right now none of dec38_0's clamped
-// int64 bound, dec38_37's float-collapsed scale, or any other column's bound is reachable at all.
+// Fixed: convertAddAction now decodes minValues/maxValues/nullCount into the lenient statsBlob shape
+// and flattens any nesting to the dot-delimited column paths model.Field.Path already uses, so
+// struct1's own leaves (asserted below) come through like any other column, and RecordCount and every
+// scalar column's bound (dec38_0's clamped int64 one and dec38_37's float-collapsed one included, both
+// real, separately confirmed writer-side precision losses — see the fixture's own manifest notes) are
+// reachable again.
 func TestTortureTypes_DeltaColumnBounds(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -262,25 +265,14 @@ func TestTortureTypes_DeltaColumnBounds(t *testing.T) {
 	require.Len(t, snapshot.DataFiles, manifest.DataFileCount)
 	file := snapshot.DataFiles[0]
 
-	t.Run("stats_blob_dropped_by_nested_struct_null_count", func(t *testing.T) {
-		// Remove this pin once pkg/formats/delta/source.go's convertAddAction tolerates (or reports)
-		// a nested null count rather than silently discarding the whole stats blob on a type
-		// mismatch, then replace it with real per-column assertions against manifest.ColumnBounds.
-		assert.Zero(t, file.RecordCount,
-			"RecordCount is no longer silently dropped; the nested-null-count defect in "+
-				"pkg/formats/delta appears fixed — replace this pin with the real assertion below")
-		assert.Empty(t, file.ColumnStats,
-			"ColumnStats is no longer silently dropped; the nested-null-count defect in "+
-				"pkg/formats/delta appears fixed — replace this pin with the real assertion below")
+	t.Run("nested_struct_null_count_no_longer_poisons_the_whole_blob", func(t *testing.T) {
+		assert.Equal(t, manifest.TotalRows, file.RecordCount,
+			"RecordCount was silently zeroed by the nested-null-count defect in pkg/formats/delta")
+		assert.NotEmpty(t, file.ColumnStats,
+			"ColumnStats was silently emptied by the nested-null-count defect in pkg/formats/delta")
 	})
 
-	t.Run("per_column_bounds_once_stats_parsing_is_fixed", func(t *testing.T) {
-		t.Skip("blocked on the stats-blob-dropped defect demonstrated above: convertAddAction " +
-			"never populates ColumnStats for this fixture at all, so no per-column bound (including " +
-			"dec38_0's int64-clamped one and dec38_37's float-collapsed one, both real, separately " +
-			"confirmed writer-side precision losses — see the fixture's own manifest notes) can be " +
-			"checked yet.")
-
+	t.Run("per_column_bounds", func(t *testing.T) {
 		for name, expected := range manifest.ColumnBounds {
 			stat := tortureColumnStat(snapshot.DataFiles, name)
 			require.NotNil(t, stat, "no column statistic for %s", name)
@@ -297,6 +289,34 @@ func TestTortureTypes_DeltaColumnBounds(t *testing.T) {
 		minVal, ok := stat.Range.MinValue.(float64)
 		require.True(t, ok, "f64 minimum is not a float64: %T", stat.Range.MinValue)
 		assert.True(t, math.Signbit(minVal), "negative zero lost its sign bit reading it back: got %v", minVal)
+	})
+
+	t.Run("struct_column_stats_flattened_to_dotted_paths", func(t *testing.T) {
+		// struct1's own bound is deliberately not in manifest.ColumnBounds (the fixture's own notes
+		// say why: it nests {inner_a, inner_struct} rather than being a per-leaf scalar), so this
+		// checks the flattened leaves directly against the raw commit JSON's nested minValues/
+		// maxValues/nullCount objects: "struct1":{"inner_a":"hello".."world",
+		// "inner_struct":{"deep":7..42}}, nullCount {"inner_a":2,"inner_struct":{"deep":2}}.
+		// The stat is located by its full dotted path internally (columnStatsFromFlatMaps in
+		// pkg/formats/delta/source.go), but the resulting Field itself only carries the leaf name:
+		// no schema builder in this package populates model.Field.ParentPath, so Field.Path() is not
+		// a reliable way to recover the dotted path from the field alone, here or anywhere else in
+		// polytable today. That gap is pre-existing and separate from this defect.
+		innerA := tortureColumnStat(snapshot.DataFiles, "inner_a")
+		require.NotNil(t, innerA, "no column statistic for struct1.inner_a")
+		assert.Equal(t, "inner_a", innerA.Field.Name)
+		assert.Equal(t, int64(2), innerA.NumNulls)
+		require.NotNil(t, innerA.Range)
+		assert.Equal(t, "hello", innerA.Range.MinValue)
+		assert.Equal(t, "world", innerA.Range.MaxValue)
+
+		deep := tortureColumnStat(snapshot.DataFiles, "deep")
+		require.NotNil(t, deep, "no column statistic for struct1.inner_struct.deep")
+		assert.Equal(t, "deep", deep.Field.Name)
+		assert.Equal(t, int64(2), deep.NumNulls)
+		require.NotNil(t, deep.Range)
+		assert.EqualValues(t, 7, deep.Range.MinValue)
+		assert.EqualValues(t, 42, deep.Range.MaxValue)
 	})
 }
 
@@ -658,21 +678,16 @@ func TestTortureTypes_ConvertDeltaTortureIntoIceberg(t *testing.T) {
 	require.Len(t, snapshot.DataFiles, manifest.DataFileCount)
 
 	t.Run("decimal_bound_dropped_on_write", func(t *testing.T) {
-		// Intended as the write-side counterpart of TestTortureTypes_IcebergColumnBounds's
-		// decimal_bounds_not_decoded: columnStatsToManifest calls EncodeBound for every column stat
-		// the source reported, and EncodeBound's own default branch silently omits DECIMAL rather
-		// than erroring, so a decimal bound should never reach the Iceberg manifest at all.
+		// The write-side counterpart of TestTortureTypes_IcebergColumnBounds's decimal_bounds_not_decoded:
+		// columnStatsToManifest calls EncodeBound for every column stat the source reported, and
+		// EncodeBound's own default branch silently omits DECIMAL rather than erroring, so a decimal
+		// bound should never reach the Iceberg manifest at all. This is a separate, still-open defect
+		// (T70 item 4) — out of scope for the fix that unblocked this subtest.
 		//
-		// It cannot be demonstrated from this fixture today: TestTortureTypes_DeltaColumnBounds's
-		// stats_blob_dropped_by_nested_struct_null_count defect means the Delta *source* itself
-		// reports zero ColumnStats for every column, dec38_0 included — there is no bound for
-		// EncodeBound to drop in the first place. TestTortureTypes_IcebergColumnBounds's
-		// decimal_bounds_not_decoded already demonstrates the same EncodeBound/DecodeBound gap
-		// directly, from a fixture unaffected by the Delta-side defect, so that is this port's
-		// evidence for the underlying gap until the Delta stats parsing is fixed.
-		t.Skip("blocked on the Delta source's stats_blob_dropped_by_nested_struct_null_count " +
-			"defect (see TestTortureTypes_DeltaColumnBounds): it reports zero ColumnStats for this " +
-			"fixture, so there is no dec38_0 bound for this conversion to drop yet")
+		// It could not be demonstrated from this fixture until the Delta source's own
+		// nested-null-count defect (T70 item 1, see TestTortureTypes_DeltaColumnBounds) was fixed:
+		// before that fix the Delta *source* reported zero ColumnStats for every column, dec38_0
+		// included, so there was no bound for EncodeBound to drop in the first place.
 
 		stat := tortureColumnStat(snapshot.DataFiles, "dec38_0")
 		require.NotNil(t, stat, "no column statistic for dec38_0")
@@ -710,13 +725,12 @@ var tortureScalarColumns = []string{
 //     ("LIST/MAP-shaped nested repetition is not supported"). This is the "fail... by name" outcome
 //     the task asks for, not silent narrowing, so it is pinned as an expected error rather than
 //     treated as a defect.
-//   - Hudi silently narrows TIMESTAMP_NTZ to STRING. Its own writer
-//     (pkg/formats/hudi/schema.go convertTypeToAvro) emits the Avro logical type
-//     "local-timestamp-micros" for TIMESTAMP_NTZ, but its own reader (parseAvroType) has no case for
-//     that logical type — only "timestamp-millis"/"timestamp-micros" (TIMESTAMP) are recognized — so
-//     the value falls through to parseAvroType's final `return model.NewPrimitiveSchema(TypeString,
-//     false)`. Hudi's own round trip disagrees with itself. Nested types are unaffected: Hudi
-//     preserves struct1/list1/map1 correctly, asserted normally below.
+//   - Hudi's TIMESTAMP_NTZ round trip is fixed: its writer (pkg/formats/hudi/schema.go
+//     convertTypeToAvro) emits the Avro logical type "local-timestamp-micros", and parseAvroType now
+//     has a case for it (and its millis sibling) instead of falling through to the function's default
+//     `return model.NewPrimitiveSchema(TypeString, false)`, which is what a Hudi table's own writer
+//     and reader disagreeing about a column's type used to look like. Nested types were unaffected by
+//     that defect either way: Hudi preserves struct1/list1/map1 correctly, asserted normally below.
 //   - Paimon silently narrows every nested type to STRING, and separately collapses the
 //     TIMESTAMP/TIMESTAMP_NTZ distinction. modelTypeToPaimonType
 //     (pkg/formats/paimon/schema.go) has no case for TypeRecord at all — it falls to that function's
@@ -786,14 +800,18 @@ func TestTortureTypes_ConvertDeltaTortureAcrossTargets(t *testing.T) {
 						assertTortureNode(t, *expected, field.Schema, name)
 					}
 				})
-				t.Run("timestamp_ntz_narrowed_to_string", func(t *testing.T) {
+				t.Run("timestamp_ntz_round_trips", func(t *testing.T) {
+					// Was timestamp_ntz_narrowed_to_string: Hudi's own writer (convertTypeToAvro)
+					// emits the Avro logical type "local-timestamp-micros" for TIMESTAMP_NTZ, but its
+					// reader (parseAvroType) had no case for it and fell through to the function's
+					// default `return model.NewPrimitiveSchema(TypeString, false)` — a format
+					// disagreeing with itself on its own round trip. Fixed by giving parseAvroType a
+					// "local-timestamp-millis"/"local-timestamp-micros" case.
 					field := table.ReadSchema.FieldByPath("ts_ntz")
 					require.NotNil(t, field)
 					require.NotNil(t, field.Schema)
-					assert.Equal(t, model.TypeString, field.Schema.DataType,
-						"ts_ntz no longer round-trips as STRING; Hudi's parseAvroType appears to have "+
-							"gained a case for the local-timestamp-micros logical type its own writer "+
-							"emits — drop this pin and assert model.TypeTimestampNTZ instead")
+					assert.Equal(t, model.TypeTimestampNTZ, field.Schema.DataType,
+						"ts_ntz no longer round-trips as TIMESTAMP_NTZ through Hudi")
 				})
 
 			case model.TableFormatPaimon:

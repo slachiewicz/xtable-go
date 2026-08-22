@@ -257,6 +257,16 @@ func parseAvroType(raw any) (*model.Schema, error) {
 				return model.NewPrimitiveSchema(model.TypeDate, false), nil
 			case "timestamp-millis", "timestamp-micros":
 				return model.NewPrimitiveSchema(model.TypeTimestamp, false), nil
+			case "local-timestamp-millis", "local-timestamp-micros":
+				// convertTypeToAvro above emits local-timestamp-micros for TIMESTAMP_NTZ; without
+				// this case, that logical type fell through to the map[string]any switch's final
+				// `return model.NewPrimitiveSchema(model.TypeString, false)` below, and a Hudi
+				// table's own writer and reader disagreed about a TIMESTAMP_NTZ column's type.
+				// local-timestamp-millis is accepted too even though this package's writer never
+				// emits it: Avro defines both millis and micros variants of the local (zone-naive)
+				// logical type, so a foreign writer's local-timestamp-millis column deserves the
+				// same treatment rather than narrowing just because this writer picked one width.
+				return model.NewPrimitiveSchema(model.TypeTimestampNTZ, false), nil
 			case "uuid":
 				return model.NewPrimitiveSchema(model.TypeUUID, false), nil
 			case "decimal":
