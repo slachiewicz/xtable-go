@@ -1,0 +1,45 @@
+{
+  "data_file_count": 4,
+  "data_files": [
+    {
+      "partition_value": "east",
+      "record_count": 1
+    },
+    {
+      "partition_value": null,
+      "record_count": 1
+    },
+    {
+      "partition_value": "",
+      "record_count": 1
+    },
+    {
+      "partition_value": "north america/100%",
+      "record_count": 1
+    }
+  ],
+  "format": "ICEBERG",
+  "format_version": 2,
+  "latest_metadata_version": 1,
+  "manifest_encoding": "avro",
+  "metadata_versions": [
+    0,
+    1
+  ],
+  "notes": [
+    "Written by pyiceberg; polytable has never touched this directory.",
+    "The null-partition row's directory is literally 'region=null' and the empty-string row's is 'region=' \u2014 pyiceberg, unlike delta-rs, keeps the manifest's own partition struct field null for the null case (entry.partition.region is None, not ''), so the null/empty distinction survives in the metadata this fixture's manifest was built from, independent of how any reader decodes the physical directory name.",
+    "The escaped row's physical directory is 'region=north+america%2F100%25' \u2014 pyiceberg encodes a space as '+' rather than delta-rs's '%20', and, unlike delta-rs, encodes the value exactly once rather than twice."
+  ],
+  "partition_columns": [
+    "region"
+  ],
+  "path_placeholder": "file:///__POLYTABLE_FIXTURE_ROOT__",
+  "table_dir": "part_torture",
+  "table_name": "part_torture",
+  "total_rows": 4,
+  "writer": {
+    "library": "pyiceberg",
+    "version": "0.11.1"
+  }
+}

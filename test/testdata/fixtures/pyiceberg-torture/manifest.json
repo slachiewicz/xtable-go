@@ -1,0 +1,236 @@
+{
+  "column_bounds": {
+    "bin_col": {
+      "max_hex": "ff",
+      "min_hex": ""
+    },
+    "f64": {
+      "max": 1.5,
+      "min": -0.0
+    },
+    "fixed4": {
+      "max_hex": "ffffffff",
+      "min_hex": "00010203"
+    },
+    "id": {
+      "max": 4,
+      "min": 1
+    },
+    "str_col": {
+      "max": "line1\nline2\ttab",
+      "min": ""
+    },
+    "str_nullable": {
+      "max": "x",
+      "min": ""
+    },
+    "ts_ntz": {
+      "max": 1767225600123456,
+      "min": -1
+    },
+    "ts_tz": {
+      "max": 1767225600000000,
+      "min": -1
+    },
+    "uid": {
+      "max": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+      "min": "00000000-0000-0000-0000-000000000000"
+    }
+  },
+  "data_file_count": 1,
+  "format": "ICEBERG",
+  "format_version": 2,
+  "latest_metadata_version": 1,
+  "manifest_encoding": "avro",
+  "metadata_versions": [
+    0,
+    1
+  ],
+  "notes": [
+    "Written by pyiceberg; polytable has never touched this directory.",
+    "column_bounds is computed directly from the Python values this script wrote, independent of pyiceberg's own encoding; raw_bounds is the exact lower/upper_bounds byte string pyiceberg recorded for that field id, hex-encoded.",
+    "polytable's EncodeBound/DecodeBound (pkg/formats/iceberg/stats.go) has no case for DECIMAL: it is listed in that function's own default branch alongside the nested types as a bound this port does not serialize or parse. A decimal column here therefore carries no ColumnStat.Range at all when read back through polytable, by documented design rather than by accident \u2014 dec38_0, dec38_37 and dec9_2 are in type_schema for the schema-precision assertion but deliberately absent from column_bounds.",
+    "table.inspect.files() cannot be used on this fixture: pyarrow 25.0.1 cannot convert the uuid extension type back out of the result table pyiceberg builds internally (ArrowNotImplementedError: extension). This script reads the manifest entries directly instead; see _iceberg_manifest_entries.",
+    "Not attempted in this table because probing it separately showed the answer: pyiceberg 0.11.1 does declare pyiceberg.types.TimestampNanoType (Iceberg v3), but catalog.create_table() with it under the default format-version 2 raises ValueError('timestamp_ns is only supported in 3 or higher'), and asking for format-version 3 explicitly raises NotImplementedError('Writing V3 is not yet supported') \u2014 this writer cannot produce a nanosecond-timestamp Iceberg table at all, by its own admission, so there is nothing for polytable's reader to be tested against yet."
+  ],
+  "path_placeholder": "file:///__POLYTABLE_FIXTURE_ROOT__",
+  "raw_bounds": {
+    "bin_col": {
+      "lower_hex": "",
+      "upper_hex": "ff"
+    },
+    "dec38_0": {
+      "lower_hex": "b4c4b357a5793b85f675ddc000000001",
+      "upper_hex": "4b3b4ca85a86c47a098a223fffffffff"
+    },
+    "dec38_37": {
+      "lower_hex": "b4c4b357a5793b85f675ddc000000001",
+      "upper_hex": "4b3b4ca85a86c47a098a223fffffffff"
+    },
+    "dec9_2": {
+      "lower_hex": "f8a432eb",
+      "upper_hex": "075bcd15"
+    },
+    "f64": {
+      "lower_hex": "0000000000000080",
+      "upper_hex": "000000000000f83f"
+    },
+    "fixed4": {
+      "lower_hex": "00010203",
+      "upper_hex": "ffffffff"
+    },
+    "id": {
+      "lower_hex": "0100000000000000",
+      "upper_hex": "0400000000000000"
+    },
+    "str_col": {
+      "lower_hex": "",
+      "upper_hex": "6c696e65310a6c696e653209746162"
+    },
+    "str_nullable": {
+      "lower_hex": "",
+      "upper_hex": "78"
+    },
+    "ts_ntz": {
+      "lower_hex": "ffffffffffffffff",
+      "upper_hex": "4022224648470600"
+    },
+    "ts_tz": {
+      "lower_hex": "ffffffffffffffff",
+      "upper_hex": "0040204648470600"
+    },
+    "uid": {
+      "lower_hex": "00000000000000000000000000000000",
+      "upper_hex": "ffffffffffffffffffffffffffffffff"
+    }
+  },
+  "table_dir": "torture",
+  "table_name": "torture",
+  "total_rows": 4,
+  "type_schema": [
+    {
+      "name": "id",
+      "nullable": false,
+      "type": "LONG"
+    },
+    {
+      "name": "dec38_0",
+      "nullable": true,
+      "precision": 38,
+      "scale": 0,
+      "type": "DECIMAL"
+    },
+    {
+      "name": "dec38_37",
+      "nullable": true,
+      "precision": 38,
+      "scale": 37,
+      "type": "DECIMAL"
+    },
+    {
+      "name": "dec9_2",
+      "nullable": true,
+      "precision": 9,
+      "scale": 2,
+      "type": "DECIMAL"
+    },
+    {
+      "name": "ts_tz",
+      "nullable": true,
+      "type": "TIMESTAMP"
+    },
+    {
+      "name": "ts_ntz",
+      "nullable": true,
+      "type": "TIMESTAMP_NTZ"
+    },
+    {
+      "name": "f64",
+      "nullable": true,
+      "type": "DOUBLE"
+    },
+    {
+      "name": "str_col",
+      "nullable": true,
+      "type": "STRING"
+    },
+    {
+      "name": "str_nullable",
+      "nullable": true,
+      "type": "STRING"
+    },
+    {
+      "name": "bin_col",
+      "nullable": true,
+      "type": "BYTES"
+    },
+    {
+      "name": "fixed4",
+      "nullable": true,
+      "size": 4,
+      "type": "FIXED"
+    },
+    {
+      "name": "uid",
+      "nullable": true,
+      "type": "UUID"
+    },
+    {
+      "fields": [
+        {
+          "name": "inner_a",
+          "nullable": true,
+          "type": "STRING"
+        },
+        {
+          "fields": [
+            {
+              "name": "deep",
+              "nullable": true,
+              "type": "LONG"
+            }
+          ],
+          "name": "inner_struct",
+          "nullable": true,
+          "type": "RECORD"
+        }
+      ],
+      "name": "struct1",
+      "nullable": true,
+      "type": "RECORD"
+    },
+    {
+      "element": {
+        "fields": [
+          {
+            "name": "x",
+            "nullable": true,
+            "type": "LONG"
+          }
+        ],
+        "nullable": true,
+        "type": "RECORD"
+      },
+      "name": "list1",
+      "nullable": true,
+      "type": "LIST"
+    },
+    {
+      "key": {
+        "nullable": false,
+        "type": "STRING"
+      },
+      "name": "map1",
+      "nullable": true,
+      "type": "MAP",
+      "value": {
+        "nullable": true,
+        "type": "LONG"
+      }
+    }
+  ],
+  "writer": {
+    "library": "pyiceberg",
+    "version": "0.11.1"
+  }
+}
