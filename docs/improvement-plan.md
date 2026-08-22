@@ -1866,6 +1866,7 @@ Iceberg→Hudi and Iceberg→Paimon now assert the plain file list every other t
 | 🧩 Landed under another number | T14 → T23 (`ListTables`, `DiscoverDatasets`) · T15 → `catalog.SyncPartitions` with `pkg/catalog/glue_partition.go`, wired at `pkg/conversion/controller.go:158`. Both are covered by tests against fakes, and **neither has been checked against a real Glue catalog** — which is what T15 asked for — so they are recorded here rather than as ✅ |
 | 📋 Unscheduled | T13 (HMS) — the roadmap's answer is to keep the explicit not-implemented refusal until a consumer with a concrete deployment appears |
 | 🎯 Open queue | T24, T30, T34, T37, T38, T39, T41–T44, T46–T50 from the roadmap, and T57, T61, T65 (v3 support), T69, T72, T73 |
+| 🎯 Open queue | T24, T30, T34, T37, T38, T39, T41–T44, T46–T50 from the roadmap, and T57, T61, T65 (v3 support), T71 |
 | ⚠️ Landed, unverified against the real service | T51 (Azure storage — green on the Azurite emulator, never run against Azure) · T52 (Entra ID auth — no Fabric workspace reached). Both name their unmet criteria in the task |
 
 **Picking up the queue.** T51 and T52 need an Azure subscription, not more work: the emulator lane
@@ -4127,7 +4128,7 @@ bug. `CommitSnapshot` now allocates an id above the highest already in `prevMeta
 
 ---
 
-## T69 — Iceberg field ids are assigned by position
+## T69 — Iceberg field ids are assigned by position ✅
 
 `SchemaToIceberg` (`pkg/formats/iceberg/schema.go`) assigns `fieldID := nextID`, incrementing per
 loop iteration, unless the source field already carries a positive `FieldID` — which a Delta source
@@ -4152,6 +4153,36 @@ what `last-column-id` in the metadata exists to support.
 
 **Acceptance:** a reorder leaves every existing field's id unchanged; a new column gets a fresh id
 above `last-column-id`; a dropped and re-added column does not silently inherit the old id.
+
+**Fixed.** `SchemaToIceberg` (`pkg/formats/iceberg/schema.go`) now takes the previous Iceberg schema
+and the previous `last-column-id`. A field's id comes from, in order: an explicit
+`model.Field.FieldID` if the source supplied one; the id already on record for the same dotted path
+in the previous schema (`fieldPathIDs`, which handles both the in-process `TableSchema` shape and
+the one decoded from a `metadata.json` file, since nested "fields" arrive as `[]*NestedField` in the
+first case and `[]interface{}` of `map[string]interface{}` in the second); otherwise a fresh id
+allocated above the previous `last-column-id`. `CommitSnapshot` (`pkg/formats/iceberg/target.go`)
+supplies both from `prevMeta`. A dropped-then-re-added column does **not** recover its old id: the
+previous schema no longer carries the dropped name, so the re-added column reads as new — the data
+files written while it was absent carry no value for it, so resurrecting the old id would let a
+reader associate the wrong file's bytes with it. Ids are never reused for an unrelated column either,
+because the id counter starts from `last-column-id` rather than from whatever ids remain in the
+previous schema. `TestSchemaEvolution_ReorderColumns` (`test/schema_evolution_test.go`) now passes
+unmodified.
+
+**A second instance of the same defect, found while fixing the first.** A Hive-style partition
+column -- one that lives only in the directory layout and never in `ReadSchema` -- is synthesized
+into the schema by `CommitSnapshot` itself, on every commit, precisely because `ReadSchema` never
+carries it for `SchemaToIceberg`'s own stability logic to see. Before this was fixed too, that
+column's id (and the partition spec's `source-id`, sitting under a `spec-id` that never changed)
+incremented by one on every single commit. `CommitSnapshot` now consults the same `fieldPathIDs`
+map for this column's name before falling back to a fresh id. `pkg/formats/iceberg/schema_id_stability_test.go`
+adds `TestIcebergTarget_CommitSnapshot_PartitionColumnIDStable` (three commits, asserts the
+column's id and `last-column-id` are unchanged across all three), plus
+`TestSchemaToIceberg_NestedFieldsStableAcrossReorder` and
+`TestSchemaToIceberg_DroppedThenReAddedColumnGetsFreshID`, both driving `SchemaToIceberg` with a
+`prevSchema` that has been round-tripped through JSON -- the shape a real `metadata.json` produces,
+where nested `fields` decode as `[]interface{}` rather than `[]*NestedField`, and which
+`TestSchemaEvolution_ReorderColumns` alone does not reach because its schema is flat.
 
 **Commit:** `fix: keep Iceberg field ids stable across schema changes`
 
@@ -4463,7 +4494,7 @@ property diff above).
 
 ---
 
-## T72 — Iceberg metadata omits `sort-orders`, which v2 requires
+## T72 — Iceberg metadata omits `sort-orders`, which v2 requires ✅
 
 Also found by Trino, and the more interesting of the two because of *why* it survived.
 
@@ -4487,6 +4518,20 @@ tolerances. Record this next to the coverage matrix.
 
 **Acceptance:** `sort-orders` is written with at least the unsorted default (order id 0), Trino reads
 the table, and DuckDB still does.
+
+**Fixed.** `TableMetadata` (`pkg/formats/iceberg/metadata.go`) gains `SortOrder`/`SortField` types
+and a `sort-orders` field with no `omitempty` — v2 requires the key to exist, not merely be
+non-empty. `CommitSnapshot` (`pkg/formats/iceberg/target.go`) writes the reserved unsorted order
+(`order-id: 0`, `fields: []`, initialised rather than left `nil` so it marshals as `[]` and not
+`null`, the same reasoning as `PartitionSpec.Fields` a few lines above) and
+`default-sort-order-id: 0`, since this target never sorts a data file it writes. Manifest entries
+already carry an optional, nullable `sort_order_id` (`manifest.go`'s Avro schema, field-id 140) —
+the specification does not make it required, so no change was needed there.
+`go test -count=1 ./test/ -run TestDockertest_Trino` now passes the Iceberg subtest
+(`Iceberg_DeltaRsCheckpointToIceberg`) that this file's own package comment documented as an
+expected failure; the Hudi subtest's unrelated, already-tracked failure (T71) is untouched.
+`go test -count=1 ./test/ -run Equivalence` (DuckDB) still passes, confirming the fix does not trade
+one reader's tolerance for another's.
 
 **Commit:** `fix: write sort-orders in Iceberg metadata`
 

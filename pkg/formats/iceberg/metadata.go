@@ -50,6 +50,23 @@ type PartitionSpec struct {
 	Fields []*PartitionFieldDef `json:"fields"`
 }
 
+// SortField represents one field of an Iceberg sort order: the source column, how it is
+// transformed before comparison, and the resulting sort direction and null placement.
+type SortField struct {
+	Transform string `json:"transform"`
+	SourceID  int    `json:"source-id"`
+	Direction string `json:"direction"`
+	NullOrder string `json:"null-order"`
+}
+
+// SortOrder represents an Iceberg sort order definition. Order id 0 is reserved by the
+// specification for "unsorted" and must carry an empty (non-null) Fields slice rather than
+// omitting the array.
+type SortOrder struct {
+	OrderID int          `json:"order-id"`
+	Fields  []*SortField `json:"fields"`
+}
+
 // SnapshotSummary holds metadata describing the commit operation and row counts.
 type SnapshotSummary struct {
 	Operation       string            `json:"operation"` // append, replace, overwrite, delete
@@ -83,17 +100,24 @@ type SnapshotLogEntry struct {
 
 // TableMetadata matches the Apache Iceberg v2/v3 metadata.json specification.
 type TableMetadata struct {
-	FormatVersion      int                 `json:"format-version"`
-	TableUUID          string              `json:"table-uuid"`
-	Location           string              `json:"location"`
-	LastSequenceNumber int64               `json:"last-sequence-number"`
-	LastUpdatedMs      int64               `json:"last-updated-ms"`
-	LastColumnID       int                 `json:"last-column-id"`
-	CurrentSchemaID    int                 `json:"current-schema-id"`
-	Schemas            []*TableSchema      `json:"schemas"`
-	DefaultSpecID      int                 `json:"default-spec-id"`
-	PartitionSpecs     []*PartitionSpec    `json:"partition-specs"`
-	LastPartitionID    int                 `json:"last-partition-id"`
+	FormatVersion      int              `json:"format-version"`
+	TableUUID          string           `json:"table-uuid"`
+	Location           string           `json:"location"`
+	LastSequenceNumber int64            `json:"last-sequence-number"`
+	LastUpdatedMs      int64            `json:"last-updated-ms"`
+	LastColumnID       int              `json:"last-column-id"`
+	CurrentSchemaID    int              `json:"current-schema-id"`
+	Schemas            []*TableSchema   `json:"schemas"`
+	DefaultSpecID      int              `json:"default-spec-id"`
+	PartitionSpecs     []*PartitionSpec `json:"partition-specs"`
+	LastPartitionID    int              `json:"last-partition-id"`
+	// SortOrders carries no omitempty: format-version 2 requires the key to exist even for a
+	// table with no ordering, which is written as the reserved unsorted order (id 0, empty
+	// Fields). Apache Iceberg's parser -- embedded in Trino -- rejects metadata missing the key
+	// outright with "sort-orders must exist in format v2"; DuckDB's reader tolerates the
+	// omission, which is why that gap was invisible to this project's DuckDB-only equivalence
+	// suite. See docs/improvement-plan.md T72.
+	SortOrders         []*SortOrder        `json:"sort-orders"`
 	DefaultSortOrderID int                 `json:"default-sort-order-id"`
 	Properties         map[string]string   `json:"properties,omitempty"`
 	CurrentSnapshotID  *int64              `json:"current-snapshot-id,omitempty"`
