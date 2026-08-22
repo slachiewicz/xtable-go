@@ -27,11 +27,22 @@
 # Do not add either trigger here.
 name: Azure Live Storage Test
 
+# DISABLED 2026-08-22. The storage account this lane targets was deleted along with its resource
+# group, so every scheduled run would fail on a missing account rather than on anything about
+# polytable. The nightly cron is commented out rather than removed, and workflow_dispatch is kept so
+# the lane can be exercised by hand the moment a replacement account exists.
+#
+# TO RE-ENABLE: create a StorageV2 account with hierarchical namespace ON (see
+# docs/azure-test-environment.md), grant the existing app registration
+# polytable-gha-azure-live the Storage Blob Data Contributor role on it, set the
+# AZURE_STORAGE_ACCOUNT repository variable to the new name, and uncomment the schedule below.
+# The app registration itself SURVIVED the deletion -- it is an Entra object, not a resource-group
+# one -- so the OIDC federation does not need rebuilding, only re-pointing.
 on:
   workflow_dispatch: {}
-  schedule:
-    # Nightly, well off the hour to avoid GitHub's documented top-of-hour scheduling contention.
-    - cron: "17 5 * * *"
+  # schedule:
+  #   # Nightly, well off the hour to avoid GitHub's documented top-of-hour scheduling contention.
+  #   - cron: "17 5 * * *"
 
 # Exactly these two, and nothing broader: id-token: write is what lets azure/login@v2 exchange a
 # GitHub OIDC token for an Azure access token, and contents: read is only what checkout needs.

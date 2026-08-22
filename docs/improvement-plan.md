@@ -2510,7 +2510,22 @@ the same commit; `docs/upstream-watch.md`'s #715 line updates to name the outcom
 
 ---
 
-## T51 — Azure storage: ADLS Gen2, `abfss://`, and the OneLake path shape ⚠️ GREEN ON AZURITE, UNTESTED ON AZURE
+## T51 — Azure storage: ADLS Gen2, `abfss://`, and the OneLake path shape ⚠️ VERIFIED LIVE, THEN THE ACCOUNT WAS DELETED
+
+**Status as of 2026-08-22, end of day.** This was verified against a real HNS-enabled ADLS Gen2
+account during the day: `abfss://` sync and read-back both worked, `DefaultAzureCredential`
+resolved with no key in the environment, and the Snowflake external-volume chain ran end to end
+with DuckDB confirming the row counts. The account and its whole resource group were then deleted.
+
+So the *code* is verified and the *lane* is not runnable. `.github/workflows/azure-live.yml` has its
+nightly schedule commented out, with the re-enable steps in the file. The app registration
+`polytable-gha-azure-live` survived — it is an Entra object rather than a resource-group one — so
+the OIDC federation needs re-pointing, not rebuilding.
+
+Still unmet from the original task: OneLake was never reached (the tenant has Fabric disabled), and
+only `abfss://` was exercised end to end of the schemes this backend claims.
+
+
 
 **A stated requirement, not an extension** (maintainer decision, 2026-08-22), and the reason the
 GCS/Azure non-goal was withdrawn: its stated precondition — T3's unreachable storage configuration —
