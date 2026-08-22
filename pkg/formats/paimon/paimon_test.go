@@ -65,20 +65,22 @@ func TestPaimon_SourceReadSnapshot(t *testing.T) {
 	memStorage := io.NewMemoryStorage()
 	basePath := "mem://lake/paimon_table"
 
-	// 1. Write schema/schema-0
-	schemaObj := paimon.TableSchema{
-		ID: 0,
-		Fields: []paimon.DataField{
-			{ID: 1, Name: "device_id", Type: "BIGINT NOT NULL"},
-			{ID: 2, Name: "reading", Type: "FLOAT"},
-			{ID: 3, Name: "city", Type: "STRING NOT NULL"},
-		},
-		HighestFieldID: 3,
-		PartitionKeys:  []string{"city"},
-	}
-	schemaBytes, err := json.Marshal(schemaObj)
-	require.NoError(t, err)
-	err = memStorage.Write(ctx, "mem://lake/paimon_table/schema/schema-0", schemaBytes)
+	// 1. Write schema/schema-0. The file is written by hand as raw JSON (rather than through a
+	// paimon.DataField literal) because paimon.PaimonType's atomic leaves are constructed via its
+	// package-private constructor; a hand-written fixture is also a closer stand-in for a schema
+	// file that came from real Paimon.
+	schemaJSON := `{
+		"id": 0,
+		"fields": [
+			{"id": 1, "name": "device_id", "type": "BIGINT NOT NULL"},
+			{"id": 2, "name": "reading", "type": "FLOAT"},
+			{"id": 3, "name": "city", "type": "STRING NOT NULL"}
+		],
+		"highestFieldId": 3,
+		"partitionKeys": ["city"]
+	}`
+	schemaBytes := []byte(schemaJSON)
+	err := memStorage.Write(ctx, "mem://lake/paimon_table/schema/schema-0", schemaBytes)
 	require.NoError(t, err)
 
 	// 2. Write snapshot/snapshot-1
