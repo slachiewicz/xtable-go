@@ -103,17 +103,47 @@ func (t *Target) GetTableMetadata(ctx context.Context) (*model.TableSyncMetadata
 
 // CommitSnapshot writes a full snapshot into Apache Iceberg metadata and manifests.
 func (t *Target) CommitSnapshot(ctx context.Context, snapshot *model.Snapshot) error {
-	versions, paths, _ := t.source.listMetadataFiles(ctx)
+	versions, paths, err := t.source.listMetadataFiles(ctx)
+	if err != nil {
+		// A listing failure is not "no table exists" -- treating it that way silently restarts
+		// version numbering at 1 and clobbers version-hint.text on the next write, discarding the
+		// table's real history. Aborting is the only non-destructive option: a table that truly has
+		// no metadata yet still commits fine, because listMetadataFiles returns (nil, nil, nil) for
+		// that case rather than an error.
+		return fmt.Errorf("failed to list existing iceberg metadata before committing a snapshot: %w", err)
+	}
 	nextVersion := 1
 	var prevMeta *TableMetadata
 	if len(versions) > 0 {
 		latestVer := versions[len(versions)-1]
 		nextVersion = latestVer + 1
-		prevMeta, _ = t.source.readMetadata(ctx, paths[latestVer])
+		prevMeta, err = t.source.readMetadata(ctx, paths[latestVer])
+		if err != nil {
+			// Same reasoning as above: a metadata file this reader cannot parse (a future format
+			// version rejected by readMetadata's maxReadableFormatVersion gate, or corruption) must
+			// not be treated as an absent table. Silently starting over at version 1 would write a
+			// new v1.metadata.json next to the v3 file the table's catalog and other readers still
+			// consider current, and version-hint.text would point readers at the wrong history.
+			return fmt.Errorf("failed to read existing iceberg metadata before committing a snapshot: %w", err)
+		}
 	}
 
 	now := time.Now().UnixMilli()
 	snapshotID := now
+	if prevMeta != nil {
+		// Snapshot IDs are derived from the wall clock, and CommitChanges can commit several
+		// snapshots back-to-back for a single incoming batch of source commits (T40 walks source
+		// history into one TableChange per commit). Two commits inside the same millisecond would
+		// otherwise collide: CurrentSnapshotID would point at an id shared by two entries in
+		// Snapshots, and a reader resolving it takes whichever appears first, silently reading the
+		// wrong -- typically older -- one. Bumping past the highest id already on record keeps ids
+		// strictly increasing regardless of clock resolution.
+		for _, s := range prevMeta.Snapshots {
+			if s.SnapshotID >= snapshotID {
+				snapshotID = s.SnapshotID + 1
+			}
+		}
+	}
 	schemaID := 0
 	if prevMeta != nil {
 		schemaID = prevMeta.CurrentSchemaID + 1
@@ -339,11 +369,25 @@ func (t *Target) CommitSnapshot(ctx context.Context, snapshot *model.Snapshot) e
 }
 
 // CommitChanges writes incremental changes.
+//
+// model.TableChange carries a diff, not a full file list, but CommitSnapshot's contract is to
+// replace the table's live file set outright with whatever DataFiles it is given -- that is what
+// "commit a snapshot" means for this target, and incremental_test.go's commitThreeSnapshots relies
+// on it. So each change here is turned into the full live set before being handed to CommitSnapshot:
+// the previous live set (read back from what the last commit -- in this loop or an earlier sync --
+// actually wrote), minus that change's FilesRemoved, plus its FilesAdded. Without this, a
+// metadata-only change that adds zero files (e.g. an ADD COLUMN with no new data) would commit a
+// manifest with nothing in it, and every row written before it would vanish from the table's own
+// view of itself.
 func (t *Target) CommitChanges(ctx context.Context, changes *model.IncrementalTableChanges) error {
 	for _, change := range changes.TableChanges {
+		liveFiles, err := t.previousLiveFiles(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to read the previous live file set before committing an incremental change: %w", err)
+		}
 		snap := &model.Snapshot{
 			Table:            change.TableAsOfChange,
-			DataFiles:        change.FilesDiff.FilesAdded,
+			DataFiles:        applyFilesDiff(liveFiles, change.FilesDiff),
 			SourceIdentifier: change.SourceIdentifier,
 		}
 		if err := t.CommitSnapshot(ctx, snap); err != nil {
@@ -351,6 +395,47 @@ func (t *Target) CommitChanges(ctx context.Context, changes *model.IncrementalTa
 		}
 	}
 	return nil
+}
+
+// previousLiveFiles returns the complete, live data file set of the target table's current
+// snapshot, or (nil, nil) if the table has no metadata yet -- a fresh incremental sync's first
+// commit is exactly that case, and it is not an error.
+func (t *Target) previousLiveFiles(ctx context.Context) ([]*model.DataFile, error) {
+	versions, _, err := t.source.listMetadataFiles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(versions) == 0 {
+		return nil, nil
+	}
+	snapshot, err := t.source.GetCurrentSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.DataFiles, nil
+}
+
+// applyFilesDiff computes the new live file set from the previous one: live files, minus any file
+// whose PhysicalPath appears in diff.FilesRemoved, plus diff.FilesAdded. Removals are applied before
+// additions are appended so that a rewrite in place -- model.DiffFiles reports a file whose size or
+// record count changed at the same path in both FilesAdded and FilesRemoved -- ends up live exactly
+// once, carrying the new metadata rather than being dropped or duplicated.
+func applyFilesDiff(live []*model.DataFile, diff *model.FilesDiff) []*model.DataFile {
+	if diff == nil {
+		return live
+	}
+	removed := make(map[string]bool, len(diff.FilesRemoved))
+	for _, f := range diff.FilesRemoved {
+		removed[f.PhysicalPath] = true
+	}
+	result := make([]*model.DataFile, 0, len(live)+len(diff.FilesAdded))
+	for _, f := range live {
+		if !removed[f.PhysicalPath] {
+			result = append(result, f)
+		}
+	}
+	result = append(result, diff.FilesAdded...)
+	return result
 }
 
 // Close is a no-op for Iceberg target.
