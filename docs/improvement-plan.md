@@ -4194,6 +4194,63 @@ recorded here as a genuine format limitation with the reason.
 
 ---
 
+## T71 — Every Hudi table polytable writes is unreadable by any real Hudi reader
+
+Found by the Trino suite on 2026-08-22, the first foreign reader ever pointed at polytable's Hudi
+output.
+
+`pkg/formats/hudi/properties.go` never writes **`hoodie.timeline.layout.version`** into
+`.hoodie/hoodie.properties`. Apache Hudi's own `HoodieTableMetaClient` — not anything
+Trino-specific — then throws:
+
+```
+TableNotFoundException: Table does not exist
+```
+
+So the table is not merely degraded, it is **not recognised as a Hudi table at all**. Spark would
+refuse it identically. Every Hudi table this project has ever produced is in that state, and nothing
+noticed because until today no reader other than polytable had ever opened one.
+
+This is the cost of the empty cell recorded in `docs/interoperability-coverage.md`: Hudi had no
+independent reader, so its output was unverified rather than verified-and-fine.
+
+**Acceptance:** a converted Hudi table is recognised by a real Hudi reader; the Trino subtest passes;
+and `hoodie.properties` is checked against what `HoodieTableMetaClient` actually requires rather than
+against what looked sufficient.
+
+**Commit:** `fix: write hoodie.timeline.layout.version so Hudi readers recognise the table`
+
+---
+
+## T72 — Iceberg metadata omits `sort-orders`, which v2 requires
+
+Also found by Trino, and the more interesting of the two because of *why* it survived.
+
+`TableMetadata` (`pkg/formats/iceberg/metadata.go`) has **no `sort-orders` field at all**, yet every
+table is written as format-version 2. Apache Iceberg's own parser, embedded in Trino, refuses it:
+
+```
+sort-orders must exist in format v2
+```
+
+Systemic — it affects every Iceberg table polytable writes.
+
+**Why the existing harness missed it, and why that matters.** DuckDB's Iceberg extension *tolerates*
+the omission and reads the table happily. So `test/equivalence_duckdb_test.go` — which found several
+real defects the same day — was structurally incapable of catching this one. Two independent readers
+disagreed about the same file, and only the stricter one was right.
+
+That is the argument for a second oracle, made empirically rather than asserted: a foreign reader is
+better than a self-check, but *one* foreign reader still only tells you about that reader's
+tolerances. Record this next to the coverage matrix.
+
+**Acceptance:** `sort-orders` is written with at least the unsorted default (order id 0), Trino reads
+the table, and DuckDB still does.
+
+**Commit:** `fix: write sort-orders in Iceberg metadata`
+
+---
+
 ## Non-goals
 
 - **Renaming stuttering identifiers** (`delta.DeltaCommit` → `Commit`, `catalog.CatalogType` → `Type`).
