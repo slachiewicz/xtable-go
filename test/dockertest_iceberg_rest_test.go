@@ -22,11 +22,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"testing"
 	"time"
 
-	"github.com/ory/dockertest/v3"
-	"github.com/ory/dockertest/v3/docker"
+	"github.com/moby/moby/api/types/network"
+	"github.com/ory/dockertest/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -39,31 +40,24 @@ func TestDockertest_IcebergRESTCatalogSync(t *testing.T) {
 		t.Skip("skipping dockertest integration test in short mode")
 	}
 
-	pool, err := dockertest.NewPool("")
-	require.NoError(t, err, "failed to connect to Docker daemon")
+	ctx := context.Background()
+	pool := dockertest.NewPoolT(t, "")
 
-	err = pool.Client.Ping()
-	require.NoError(t, err, "failed to ping Docker daemon")
-
-	// 1. Run Tabular Iceberg REST Catalog container with 120s auto-expiry
-	resource, err := pool.RunWithOptions(&dockertest.RunOptions{
-		Repository: "tabulario/iceberg-rest",
-		Tag:        "latest",
-		PortBindings: map[docker.Port][]docker.PortBinding{
-			"8181/tcp": {{HostIP: "127.0.0.1", HostPort: ""}},
-		},
-	})
-	require.NoError(t, err, "failed to start Iceberg REST container")
-	_ = resource.Expire(120)
-	defer func() {
-		_ = pool.Purge(resource)
-	}()
+	// 1. Run Tabular Iceberg REST Catalog container. dockertest v4 replaces v3's server-side
+	// Expire(120)-then-Purge with RunT's automatic t.Cleanup: the container is still single-use per
+	// test run (WithoutReuse), but a SIGKILL'd test process now leaks it instead of the daemon
+	// reaping it on a timer -- see dockertest_trino_test.go's package comment for the full v3/v4
+	// tradeoff this tree accepted when the other dockertest_*.go files were migrated to v4.
+	resource := pool.RunT(t, "tabulario/iceberg-rest", dockertest.WithTag("latest"), dockertest.WithoutReuse(),
+		dockertest.WithPortBindings(network.PortMap{
+			network.MustParsePort("8181/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: ""}},
+		}))
 
 	restPort := resource.GetPort("8181/tcp")
 	restURL := fmt.Sprintf("http://127.0.0.1:%s", restPort)
 
 	// 2. Wait for Iceberg REST Catalog readiness
-	err = pool.Retry(func() error {
+	err := pool.Retry(ctx, 60*time.Second, func() error {
 		resp, err := http.Get(fmt.Sprintf("%s/v1/config", restURL))
 		if err != nil {
 			return err
@@ -75,8 +69,6 @@ func TestDockertest_IcebergRESTCatalogSync(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err, "iceberg rest catalog failed to become ready in time")
-
-	ctx := context.Background()
 
 	// Create namespace 'analytics' in Iceberg REST Catalog
 	nsBody := []byte(`{"namespace": ["analytics"]}`)

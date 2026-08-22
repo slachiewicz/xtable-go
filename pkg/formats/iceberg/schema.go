@@ -19,12 +19,19 @@ package iceberg
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/slachiewicz/polytable/pkg/model"
 )
+
+// ErrUnsupportedIcebergType is returned by parseIcebergType (and so by IcebergToSchema) for an
+// Iceberg type this port has no canonical model representation for. It replaces a former silent
+// fallback to TypeString: a type that cannot be translated must fail loudly, by name, rather than
+// arrive as an unlabeled string column with no indication anything was lost.
+var ErrUnsupportedIcebergType = errors.New("iceberg: unsupported type")
 
 // SchemaToIceberg converts a canonical model.Schema to an Iceberg TableSchema, assigning field IDs.
 func SchemaToIceberg(schema *model.Schema, schemaID int) (*TableSchema, int, error) {
@@ -330,8 +337,21 @@ func parseIcebergType(raw any, nullable bool) (*model.Schema, error) {
 				}
 			}
 			return model.NewDecimalSchema(p, s, nullable), nil
+		case strings.HasPrefix(v, "fixed[") && strings.HasSuffix(v, "]"):
+			inner := strings.TrimSuffix(strings.TrimPrefix(v, "fixed["), "]")
+			size, err := strconv.Atoi(strings.TrimSpace(inner))
+			if err != nil {
+				return nil, fmt.Errorf("%w: malformed fixed length %q: %v", ErrUnsupportedIcebergType, v, err)
+			}
+			return &model.Schema{
+				DataType:   model.TypeFixed,
+				IsNullable: nullable,
+				Metadata: map[model.MetadataKey]any{
+					model.MetadataKeyFixedBytesSize: size,
+				},
+			}, nil
 		default:
-			return model.NewPrimitiveSchema(model.TypeString, nullable), nil
+			return nil, fmt.Errorf("%w: %q", ErrUnsupportedIcebergType, v)
 		}
 
 	case map[string]any:
@@ -401,8 +421,10 @@ func parseIcebergType(raw any, nullable bool) (*model.Schema, error) {
 					Schema: vSchema,
 				},
 			}, nil
+		default:
+			return nil, fmt.Errorf("%w: %q", ErrUnsupportedIcebergType, typeStr)
 		}
 	}
 
-	return model.NewPrimitiveSchema(model.TypeString, nullable), nil
+	return nil, fmt.Errorf("%w: %#v", ErrUnsupportedIcebergType, raw)
 }

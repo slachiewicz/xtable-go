@@ -4218,6 +4218,16 @@ manifest reader is still `map[string]string`, the same JSON-collapse defect 2 fi
 this reader does not know a real Paimon writer's configured `partition.default-name`, so choosing
 that marker without verifying it against a real Paimon table risked being actively wrong. Paimon's
 own null-vs-empty collapse on read remains open, alongside its unrelated defect 7 below.
+## T70 — Seven type-translation defects, six of them silent
+
+Found by `test/torture_types_test.go` on 2026-08-22, whose fixtures put values on the boundaries
+where translation breaks rather than in the middle where it does not. Five of these were originally
+pinned by skipped tests rather than asserted as correct behaviour; defect 3's two skips were removed
+2026-08-22 once it was fixed. The remaining three skips are one for defect 1
+(`per_column_bounds_once_stats_parsing_is_fixed` — its other test,
+`stats_blob_dropped_by_nested_struct_null_count`, demonstrates the defect directly and passes), one
+for defect 2 (`null_distinct_from_empty_string`), and one for the write-side half of defect 4
+(`decimal_bound_dropped_on_write`, blocked on defect 1 — see below).
 
 **1. A struct column silently discards the entire statistics blob.** The headline defect.
 `StatsJSON.NullCount` is `map[string]int64` (`pkg/formats/delta`), but delta-rs legitimately nests a
@@ -4275,6 +4285,35 @@ rather than becoming `STRING`.
 
 **Still unverified against any Paimon engine** — that has not changed, and the closest substitute is
 a fixture hand-derived from `DataTypeJsonParser`'s rules rather than from this package's own writer.
+**3. `fixed[N]` narrows to string silently.** ✅ **FIXED.** `parseIcebergType` now has a `fixed[N]`
+case that parses the byte width into `MetadataKeyFixedBytesSize`, so `DecodeBound` decodes its bound
+as `[]byte` via the existing `TypeFixed` case rather than as a Go string. `parseIcebergType`'s
+remaining fallbacks (an unrecognised primitive type string, an unrecognised `"type"` in a
+struct/list/map node, and a schema node that is neither shape) now return
+`iceberg.ErrUnsupportedIcebergType` instead of silently narrowing to `TypeString`, per the task's
+"fail or warn by name" requirement — there is no longer a silent-string escape hatch in this
+function for any type this port does not know.
+
+**4. Decimal bounds are dropped on read and write.** ✅ **FIXED.** `EncodeBound`/`DecodeBound` gained
+a `DECIMAL` case: the unscaled value, as minimal two's-complement big-endian bytes per the
+specification. The Go-side value is `*big.Int` (accepted on encode as `*big.Int`, the built-in
+integer types, or a base-10 unscaled string) rather than a rescaled logical decimal — deliberately:
+a `float64` bound reaching `EncodeBound` is the *logical* value (e.g. from Delta's JSON-decoded
+stats), and reinterpreting it as already-unscaled without knowing the scale would silently write the
+wrong bound, which is worse than the previous silent omission. `EncodeBound` refuses a float bound
+for DECIMAL rather than guess at it; that half of the gap (Delta's logical decimal stats never
+reaching a synced Iceberg manifest) stays open until defect 1 makes Delta's decimal bounds visible
+in the first place — `TestTortureTypes_ConvertDeltaTortureIntoIceberg/decimal_bound_dropped_on_write`
+stays skipped for exactly that reason.
+
+**5. An empty bound is indistinguishable from a missing one.** ✅ **FIXED.** `DecodeBound` now keys
+"missing" off `raw == nil` rather than `len(raw) == 0`, so a present-but-empty bound (an empty string
+or empty binary minimum) decodes to `""` / a non-nil empty `[]byte` instead of collapsing to "no
+bound at all". The distinction only survives if the caller preserves it: a plain map index cannot
+tell "key absent" from "key present with a nil `[]byte` value" apart on its own, so
+`columnStatsFromManifest` reads bounds through a new `boundBytes` helper that uses the two-value map
+form and normalizes a present-but-nil entry to a non-nil empty slice before calling `DecodeBound`.
+
 **6. Hudi's writer and its own reader disagree.** The writer emits the Avro logical type
 `local-timestamp-micros` for `TIMESTAMP_NTZ`; its reader has no case for it and narrows to `STRING`.
 A self-inconsistent round trip, which is the one class a self-test *should* have caught.
@@ -4286,6 +4325,9 @@ was right; and `TIMESTAMP` and `TIMESTAMP_NTZ` both collapse to `TIMESTAMP(6)`.
 **Not defects, recorded so they are not re-investigated.** Iceberg `UUID` → Delta `STRING` is an
 explicit, defensible mapping rather than the default fallback. The Parquet schema reader *correctly*
 errors by name on LIST/MAP-shaped nesting rather than narrowing.
+errors by name on LIST/MAP-shaped nesting rather than narrowing. Iceberg `FIXED` → Delta `BYTES` is
+the same class of explicit, defensible mapping, once defect 3 stopped the *source* side from
+mis-reporting `FIXED` as `STRING` before it ever reached the Delta target.
 
 **Writer limitations polytable cannot recover**, observed and recorded in the fixture manifests:
 delta-rs clamps `decimal(38,0)` stats to int64 range and collapses `decimal(38,37)` to a lossy
@@ -4300,6 +4342,10 @@ which has an upstream issue to match against. (3), (4) and (5) are narrower and 
 because a format disagreeing with itself needs no foreign reader to be wrong. Then (2), which has an
 upstream issue to match against. (3), (4) and (5) are narrower and share the `DecodeBound` seam, so
 they are one change.
+because a format disagreeing with itself needs no foreign reader to be wrong. Then (2), which has an
+upstream issue to match against. (3), (4) and (5) are narrower and share the `DecodeBound` seam, so
+they are one change. ✅ **(3), (4) and (5) fixed 2026-08-22** — see each defect's entry above; (1),
+(2), (6) and (7) remain open.
 
 **Acceptance:** each skipped test in `test/torture_types_test.go` is unskipped and passes, or is
 recorded here as a genuine format limitation with the reason.

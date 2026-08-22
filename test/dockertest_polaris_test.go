@@ -22,14 +22,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/ory/dockertest/v3"
-	"github.com/ory/dockertest/v3/docker"
+	"github.com/moby/moby/api/types/network"
+	"github.com/ory/dockertest/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -172,43 +173,35 @@ func TestDockertest_Polaris(t *testing.T) {
 		t.Skip("skipping dockertest integration test in short mode")
 	}
 
-	pool, err := dockertest.NewPool("")
-	require.NoError(t, err, "failed to connect to Docker daemon")
+	ctx := context.Background()
+	pool := dockertest.NewPoolT(t, "")
 
-	err = pool.Client.Ping()
-	require.NoError(t, err, "failed to ping Docker daemon")
-
-	// Apache Polaris takes roughly 20-40s to boot (Quarkus startup), well past dockertest's
-	// default 60s Retry window, so MaxWait is raised to give it room.
-	pool.MaxWait = 2 * time.Minute
-
-	resource, err := pool.RunWithOptions(&dockertest.RunOptions{
-		Repository: "apache/polaris",
-		Tag:        "latest",
-		Env: []string{
+	// Apache Polaris takes roughly 20-40s to boot (Quarkus startup), well past dockertest's default
+	// 60s Retry window, so the readiness Retry below is given 2 minutes rather than a v3-style
+	// pool-wide MaxWait override.
+	//
+	// dockertest v4 replaces v3's server-side Expire(300)-then-Purge with RunT's automatic
+	// t.Cleanup: the container is still single-use per test run (WithoutReuse), but a SIGKILL'd test
+	// process now leaks it instead of the daemon reaping it on a timer -- see
+	// dockertest_trino_test.go's package comment for the full v3/v4 tradeoff this tree accepted when
+	// the other dockertest_*.go files were migrated to v4.
+	resource := pool.RunT(t, "apache/polaris", dockertest.WithTag("latest"), dockertest.WithoutReuse(),
+		dockertest.WithEnv([]string{
 			"POLARIS_BOOTSTRAP_CREDENTIALS=" + polarisRealm + "," + polarisRootClientID + "," + polarisRootSecret,
 			"polaris.realm-context.realms=" + polarisRealm,
-		},
-		PortBindings: map[docker.Port][]docker.PortBinding{
-			"8181/tcp": {{HostIP: "127.0.0.1", HostPort: ""}},
-		},
-	})
-	require.NoError(t, err, "failed to start Apache Polaris container")
-	_ = resource.Expire(300)
-	defer func() {
-		_ = pool.Purge(resource)
-	}()
+		}),
+		dockertest.WithPortBindings(network.PortMap{
+			network.MustParsePort("8181/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: ""}},
+		}))
 
 	polarisPort := resource.GetPort("8181/tcp")
 	catalogBaseURI := fmt.Sprintf("http://127.0.0.1:%s/api/catalog", polarisPort)
 	managementBaseURI := fmt.Sprintf("http://127.0.0.1:%s/api/management/v1", polarisPort)
 
-	ctx := context.Background()
-
 	// Readiness: GET /v1/config must answer exactly 401 -- that means the route is live and auth
 	// is enforced. Any other response (including a 404, which /q/health always gives on this
 	// image, or a 503 mid-startup) is not evidence of readiness and must not be treated as such.
-	err = pool.Retry(func() error {
+	err := pool.Retry(ctx, 2*time.Minute, func() error {
 		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, catalogBaseURI+"/v1/config", nil)
 		if reqErr != nil {
 			return reqErr

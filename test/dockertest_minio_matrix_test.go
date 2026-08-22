@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"testing"
 	"time"
@@ -29,8 +30,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/ory/dockertest/v3"
-	"github.com/ory/dockertest/v3/docker"
+	"github.com/moby/moby/api/types/network"
+	"github.com/ory/dockertest/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -54,36 +55,29 @@ func TestDockertest_MinIO_FullLakehouseMatrix(t *testing.T) {
 		t.Skip("skipping dockertest integration test in short mode")
 	}
 
-	pool, err := dockertest.NewPool("")
-	require.NoError(t, err, "failed to connect to Docker daemon")
+	ctx := context.Background()
+	pool := dockertest.NewPoolT(t, "")
 
-	err = pool.Client.Ping()
-	require.NoError(t, err, "failed to ping Docker daemon")
-
-	// 1. Run MinIO container with 120s auto-expiry to prevent orphan containers
-	resource, err := pool.RunWithOptions(&dockertest.RunOptions{
-		Repository: "minio/minio",
-		Tag:        "latest",
-		Cmd:        []string{"server", "/data"},
-		Env: []string{
+	// 1. Run MinIO. dockertest v4 replaces v3's server-side Expire(120)-then-Purge with RunT's
+	// automatic t.Cleanup: the container is still single-use per test run (WithoutReuse), but a
+	// SIGKILL'd test process now leaks it instead of the daemon reaping it on a timer -- see
+	// dockertest_trino_test.go's package comment for the full v3/v4 tradeoff this tree accepted when
+	// the other dockertest_*.go files were migrated to v4.
+	resource := pool.RunT(t, "minio/minio", dockertest.WithTag("latest"), dockertest.WithoutReuse(),
+		dockertest.WithCmd([]string{"server", "/data"}),
+		dockertest.WithEnv([]string{
 			"MINIO_ROOT_USER=" + minioUser,
 			"MINIO_ROOT_PASSWORD=" + minioPassword,
-		},
-		PortBindings: map[docker.Port][]docker.PortBinding{
-			"9000/tcp": {{HostIP: "127.0.0.1", HostPort: ""}},
-		},
-	})
-	require.NoError(t, err, "failed to start MinIO container")
-	_ = resource.Expire(120)
-	defer func() {
-		_ = pool.Purge(resource)
-	}()
+		}),
+		dockertest.WithPortBindings(network.PortMap{
+			network.MustParsePort("9000/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: ""}},
+		}))
 
 	minioPort := resource.GetPort("9000/tcp")
 	minioEndpoint := fmt.Sprintf("http://127.0.0.1:%s", minioPort)
 
 	// 2. Wait for MinIO readiness
-	err = pool.Retry(func() error {
+	err := pool.Retry(ctx, 60*time.Second, func() error {
 		resp, err := http.Get(fmt.Sprintf("%s/minio/health/live", minioEndpoint))
 		if err != nil {
 			return err
@@ -95,8 +89,6 @@ func TestDockertest_MinIO_FullLakehouseMatrix(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err, "minio failed to become ready in time")
-
-	ctx := context.Background()
 
 	// 3. Set AWS credentials for MinIO via environment variables for config path testing
 	_ = os.Setenv("AWS_ACCESS_KEY_ID", minioUser)

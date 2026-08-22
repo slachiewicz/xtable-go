@@ -21,14 +21,16 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 	gluetypes "github.com/aws/aws-sdk-go-v2/service/glue/types"
-	"github.com/ory/dockertest/v3"
-	"github.com/ory/dockertest/v3/docker"
+	"github.com/moby/moby/api/types/network"
+	"github.com/ory/dockertest/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -62,27 +64,20 @@ func TestDockertest_Glue_MotoCatalogSync(t *testing.T) {
 		t.Skip("skipping dockertest integration test in short mode")
 	}
 
-	pool, err := dockertest.NewPool("")
-	require.NoError(t, err, "failed to connect to Docker daemon")
+	ctx := context.Background()
+	pool := dockertest.NewPoolT(t, "")
 
-	err = pool.Client.Ping()
-	require.NoError(t, err, "failed to ping Docker daemon")
-
-	// 1. Run moto with 120s auto-expiry to prevent orphan containers. moto serves every emulated
-	// AWS API from the single port 5000, distinguishing services by the request's target header
-	// rather than by port, so no service-specific Cmd or Env is needed to reach Glue specifically.
-	resource, err := pool.RunWithOptions(&dockertest.RunOptions{
-		Repository: "motoserver/moto",
-		Tag:        "latest",
-		PortBindings: map[docker.Port][]docker.PortBinding{
-			"5000/tcp": {{HostIP: "127.0.0.1", HostPort: ""}},
-		},
-	})
-	require.NoError(t, err, "failed to start moto container")
-	_ = resource.Expire(120)
-	defer func() {
-		_ = pool.Purge(resource)
-	}()
+	// 1. Run moto. dockertest v4 replaces v3's server-side Expire(120)-then-Purge with RunT's
+	// automatic t.Cleanup: the container is still single-use per test run (WithoutReuse), but a
+	// SIGKILL'd test process now leaks it instead of the daemon reaping it on a timer -- see
+	// dockertest_trino_test.go's package comment for the full v3/v4 tradeoff this tree accepted when
+	// the other dockertest_*.go files were migrated to v4. moto serves every emulated AWS API from
+	// the single port 5000, distinguishing services by the request's target header rather than by
+	// port, so no service-specific Cmd or Env is needed to reach Glue specifically.
+	resource := pool.RunT(t, "motoserver/moto", dockertest.WithTag("latest"), dockertest.WithoutReuse(),
+		dockertest.WithPortBindings(network.PortMap{
+			network.MustParsePort("5000/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: ""}},
+		}))
 
 	motoPort := resource.GetPort("5000/tcp")
 	motoEndpoint := fmt.Sprintf("http://127.0.0.1:%s", motoPort)
@@ -90,8 +85,8 @@ func TestDockertest_Glue_MotoCatalogSync(t *testing.T) {
 	// 2. Wait for moto readiness. moto has no dedicated health endpoint, so any HTTP response from
 	// the root -- moto answers 200 there -- proves the listener is up. http.NewRequestWithContext is
 	// used rather than http.Get on the variable endpoint URL, which gosec's G107 flags.
-	err = pool.Retry(func() error {
-		req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet, motoEndpoint, nil)
+	err := pool.Retry(ctx, 60*time.Second, func() error {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, motoEndpoint, nil)
 		if reqErr != nil {
 			return reqErr
 		}
@@ -110,8 +105,6 @@ func TestDockertest_Glue_MotoCatalogSync(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 	t.Setenv("AWS_REGION", "us-east-1")
-
-	ctx := context.Background()
 
 	// 4. Create the Glue database with a raw glue.Client, mirroring how the Azurite and MinIO
 	// suites create their own containers/buckets with a raw azblob/s3 client before handing control

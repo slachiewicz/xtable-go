@@ -21,14 +21,15 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
-	"github.com/ory/dockertest/v3"
-	"github.com/ory/dockertest/v3/docker"
+	"github.com/moby/moby/api/types/network"
+	"github.com/ory/dockertest/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -57,15 +58,15 @@ const (
 // because azblob sends a newer x-ms-version than Azurite recognizes, which Azurite rejects with
 // InvalidHeaderValue on the first request; the emulator trails the service, so expect this to stay
 // true after each SDK bump.
-func azuriteRunOptions(env []string) *dockertest.RunOptions {
-	return &dockertest.RunOptions{
-		Repository: "mcr.microsoft.com/azure-storage/azurite",
-		Tag:        "latest",
-		Cmd:        []string{"azurite-blob", "--blobHost", "0.0.0.0", "--blobPort", "10000", "--skipApiVersionCheck"},
-		Env:        env,
-		PortBindings: map[docker.Port][]docker.PortBinding{
-			"10000/tcp": {{HostIP: "127.0.0.1", HostPort: ""}},
-		},
+func azuriteRunOptions(env []string) []dockertest.RunOption {
+	return []dockertest.RunOption{
+		dockertest.WithTag("latest"),
+		dockertest.WithCmd([]string{"azurite-blob", "--blobHost", "0.0.0.0", "--blobPort", "10000", "--skipApiVersionCheck"}),
+		dockertest.WithEnv(env),
+		dockertest.WithoutReuse(),
+		dockertest.WithPortBindings(network.PortMap{
+			network.MustParsePort("10000/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: ""}},
+		}),
 	}
 }
 
@@ -78,21 +79,29 @@ func azuriteRunOptions(env []string) *dockertest.RunOptions {
 // this retries with a fresh allocation rather than pretending to know it. If a retry also fails,
 // the error surfaces with the attempt count, which distinguishes a transient collision from a port
 // that is permanently occupied on that host.
-func runAzurite(pool *dockertest.Pool, env []string) (*dockertest.Resource, error) {
+//
+// This does not use pool.RunT: RunT calls t.Fatalf on the first error, which would abort the test on
+// the very first collision rather than allow the retry this function exists to do. pool.Run is used
+// directly instead, with r.Cleanup(t) called by hand on the success path so the container is still
+// torn down through the same t.Cleanup mechanism every other container in this tree uses.
+func runAzurite(ctx context.Context, t *testing.T, pool dockertest.Pool, env []string) dockertest.Resource {
+	t.Helper()
 	const attempts = 3
 
-	var err error
+	var lastErr error
 	for i := 1; i <= attempts; i++ {
-		var resource *dockertest.Resource
-		resource, err = pool.RunWithOptions(azuriteRunOptions(env))
+		r, err := pool.Run(ctx, "mcr.microsoft.com/azure-storage/azurite", azuriteRunOptions(env)...)
 		if err == nil {
-			return resource, nil
+			r.Cleanup(t)
+			return r
 		}
+		lastErr = err
 		if !strings.Contains(err.Error(), "address already in use") {
-			return nil, err
+			t.Fatalf("failed to start azurite container: %v", err)
 		}
 	}
-	return nil, fmt.Errorf("azurite container failed to bind a host port after %d attempts: %w", attempts, err)
+	t.Fatalf("azurite container failed to bind a host port after %d attempts: %v", attempts, lastErr)
+	return nil
 }
 
 func TestDockertest_Azurite_FullLakehouseMatrix(t *testing.T) {
@@ -100,19 +109,15 @@ func TestDockertest_Azurite_FullLakehouseMatrix(t *testing.T) {
 		t.Skip("skipping dockertest integration test in short mode")
 	}
 
-	pool, err := dockertest.NewPool("")
-	require.NoError(t, err, "failed to connect to Docker daemon")
+	ctx := context.Background()
+	pool := dockertest.NewPoolT(t, "")
 
-	err = pool.Client.Ping()
-	require.NoError(t, err, "failed to ping Docker daemon")
-
-	// 1. Run Azurite container with 120s auto-expiry to prevent orphan containers
-	resource, err := runAzurite(pool, nil)
-	require.NoError(t, err, "failed to start Azurite container")
-	_ = resource.Expire(120)
-	defer func() {
-		_ = pool.Purge(resource)
-	}()
+	// 1. Run Azurite. dockertest v4 replaces v3's server-side Expire(120)-then-Purge with
+	// runAzurite's r.Cleanup(t) (see that function's doc comment): the container is still single-use
+	// per test run, but a SIGKILL'd test process now leaks it instead of the daemon reaping it on a
+	// timer -- see dockertest_trino_test.go's package comment for the full v3/v4 tradeoff this tree
+	// accepted when the other dockertest_*.go files were migrated to v4.
+	resource := runAzurite(ctx, t, pool, nil)
 
 	azuritePort := resource.GetPort("10000/tcp")
 	blobServiceURL := fmt.Sprintf("http://127.0.0.1:%s/%s", azuritePort, azuriteAccountName)
@@ -120,8 +125,8 @@ func TestDockertest_Azurite_FullLakehouseMatrix(t *testing.T) {
 	// 2. Wait for Azurite readiness. Azurite has no health endpoint, so any HTTP response —
 	// including the 400 Azurite returns for an unauthenticated GET on the service root — proves
 	// the listener is up.
-	err = pool.Retry(func() error {
-		req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet, blobServiceURL, nil)
+	err := pool.Retry(ctx, 60*time.Second, func() error {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, blobServiceURL, nil)
 		if reqErr != nil {
 			return reqErr
 		}
@@ -133,8 +138,6 @@ func TestDockertest_Azurite_FullLakehouseMatrix(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err, "azurite failed to become ready in time")
-
-	ctx := context.Background()
 
 	// 3. Configure the Azure-backed storage through conversion.StorageConfig, the same path the
 	// CLI, daemon and REST server use. AccountKey has no StorageConfig field — credentials are
@@ -490,17 +493,12 @@ func TestDockertest_Azurite_FullLakehouseMatrix(t *testing.T) {
 		// Start a second Azurite container with its own account, via AZURITE_ACCOUNTS, so the two
 		// datasets below really do talk to different stores rather than the same devstoreaccount1
 		// reachable on two ports.
-		resourceB, err := runAzurite(pool, []string{fmt.Sprintf("AZURITE_ACCOUNTS=%s:%s", secondAccountName, secondAccountKey)})
-		require.NoError(t, err, "failed to start second Azurite container")
-		_ = resourceB.Expire(120)
-		defer func() {
-			_ = pool.Purge(resourceB)
-		}()
+		resourceB := runAzurite(ctx, t, pool, []string{fmt.Sprintf("AZURITE_ACCOUNTS=%s:%s", secondAccountName, secondAccountKey)})
 
 		secondPort := resourceB.GetPort("10000/tcp")
 		secondBlobServiceURL := fmt.Sprintf("http://127.0.0.1:%s/%s", secondPort, secondAccountName)
 
-		err = pool.Retry(func() error {
+		err := pool.Retry(ctx, 60*time.Second, func() error {
 			req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, secondBlobServiceURL, nil)
 			if reqErr != nil {
 				return reqErr
