@@ -126,7 +126,13 @@ func (t *Target) CommitSnapshot(ctx context.Context, snapshot *model.Snapshot) e
 	}
 
 	// 2. Convert Partition Spec
-	var partitionFieldDefs []*PartitionFieldDef
+	// Initialised rather than declared nil: PartitionSpec.Fields carries no omitempty, and
+	// encoding/json renders a nil slice as null. The Iceberg specification requires an array --
+	// empty for an unpartitioned table -- and DuckDB's reader refuses the metadata outright with
+	// "PartitionSpec property 'fields' is not of type 'array', found 'null' instead". Every
+	// partitioned fixture appends at least once and so hides this, which is exactly how the same
+	// defect survived in the Delta target's partitionColumns until a foreign reader found it.
+	partitionFieldDefs := make([]*PartitionFieldDef, 0, len(snapshot.Table.PartitioningFields))
 	for idx, pf := range snapshot.Table.PartitioningFields {
 		if pf.TransformType != model.PartitionTransformValue {
 			return fmt.Errorf("iceberg target cannot write the %s partition transform on %s: only "+

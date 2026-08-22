@@ -134,6 +134,16 @@ func TestEquivalence_DuckDBCrossEngine(t *testing.T) {
 			targetScan, err := duckdbScanExpr(tc.target, tableDir)
 			require.NoError(t, err, "no duckdb reader for the %s target", tc.target)
 
+			// A pair of scans that both, wrongly, come back empty would otherwise pass the
+			// multiset comparison below trivially: two empty sets are equal. manifest.TotalRows is
+			// ground truth from the fixture's own writer (delta-rs or pyiceberg), independent of
+			// both duckdb and polytable, so anchoring the source side against it closes that hole --
+			// if the source scan does not see every row the writer actually wrote, that surfaces
+			// here instead of silently degrading the row comparison into nothing-vs-nothing.
+			sourceCount, err := duckdbCount(t, bin, fmt.Sprintf("SELECT count(*) AS n FROM %s", sourceScan))
+			require.NoError(t, err, "%s reader could not count the source table", tc.source)
+			require.Equal(t, manifest.TotalRows, sourceCount, "%s row count vs the fixture manifest's ground truth", tc.source)
+
 			assertDuckDBEquivalence(t, bin, string(tc.source), sourceScan, string(tc.target), targetScan)
 		})
 	}

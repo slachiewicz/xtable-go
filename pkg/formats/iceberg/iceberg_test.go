@@ -19,6 +19,7 @@ package iceberg_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -181,4 +182,63 @@ func TestIceberg_SnapshotCommitAndRead(t *testing.T) {
 	assert.Contains(t, meta.CustomProperties, model.KeyLastInstantSynced)
 	assert.Contains(t, meta.CustomProperties, model.KeySourceFormat)
 	assert.Contains(t, meta.CustomProperties, model.KeyXTableMetadata)
+}
+
+// TestIceberg_PartitionSpecFieldsIsArrayNotNull pins the second instance of a defect first found in
+// the Delta target. PartitionSpec.Fields carries no omitempty, so a nil slice marshals to null,
+// and the Iceberg specification requires an array -- empty for an unpartitioned table. DuckDB's
+// reader refuses such metadata outright:
+//
+//	Invalid Input Error: PartitionSpec property 'fields' is not of type 'array', found 'null' instead
+//
+// Every partitioned fixture appends at least one field and so cannot see this, which is how the
+// identical bug survived in the Delta target's partitionColumns until a foreign reader found it.
+// Both were fixed on the same day; this test exists so the third one is caught here instead.
+func TestIceberg_PartitionSpecFieldsIsArrayNotNull(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	memStorage := io.NewMemoryStorage()
+	basePath := "mem://lake/iceberg_unpartitioned"
+
+	table := &model.Table{
+		Name:        "events",
+		TableFormat: model.TableFormatIceberg,
+		ReadSchema: model.NewRecordSchema("events", []*model.Field{
+			{Name: "id", Schema: model.NewPrimitiveSchema(model.TypeLong, false)},
+		}, false),
+		BasePath:         basePath,
+		LatestCommitTime: time.Now().UnixMilli(),
+		// Deliberately no PartitioningFields: that is the case that produces the nil slice.
+	}
+
+	target := iceberg.NewTarget(memStorage)
+	require.NoError(t, target.Init(ctx, table))
+	require.NoError(t, target.CommitSnapshot(ctx, &model.Snapshot{
+		Table: table,
+		DataFiles: []*model.DataFile{{
+			PhysicalPath:  basePath + "/data/part-0.parquet",
+			FileFormat:    model.FileFormatParquet,
+			FileSizeBytes: 256,
+			RecordCount:   2,
+			LastModified:  time.Now().UnixMilli(),
+		}},
+		SourceIdentifier: "snap-1",
+	}))
+
+	var found bool
+	entries, err := memStorage.List(ctx, io.JoinPath(basePath, "metadata"))
+	require.NoError(t, err)
+	for _, e := range entries {
+		if e.IsDir || !strings.HasSuffix(e.Path, ".metadata.json") {
+			continue
+		}
+		raw, readErr := memStorage.Read(ctx, e.Path)
+		require.NoError(t, readErr)
+		assert.Contains(t, string(raw), `"fields":[]`,
+			"an unpartitioned table must write an empty array, not null")
+		assert.NotContains(t, string(raw), `"fields":null`)
+		found = true
+	}
+	require.True(t, found, "expected at least one metadata.json to inspect")
 }
