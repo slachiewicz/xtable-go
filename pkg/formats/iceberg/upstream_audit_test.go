@@ -76,7 +76,7 @@ func TestUpstream797_NestedFieldComments(t *testing.T) {
 		}},
 	}, false)
 
-	icebergSchema, _, err := iceberg.SchemaToIceberg(source, 0)
+	icebergSchema, _, err := iceberg.SchemaToIceberg(source, 0, nil, 0)
 	require.NoError(t, err)
 
 	// Round trip through JSON, which is how a target's metadata reaches a source.

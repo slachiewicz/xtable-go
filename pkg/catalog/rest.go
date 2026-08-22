@@ -88,7 +88,10 @@ func (c *IcebergRESTCatalogClient) CreateOrUpdateTable(ctx context.Context, tabl
 	}
 
 	schemaID := 0
-	tableSchema, _, err := iceberg.SchemaToIceberg(table.ReadSchema, schemaID)
+	// No previous Iceberg schema exists yet -- this call registers or fully replaces the table's
+	// metadata with the REST catalog -- so field ids are assigned fresh from 1 rather than kept
+	// stable against a prior commit (see SchemaToIceberg's doc comment, T69).
+	tableSchema, _, err := iceberg.SchemaToIceberg(table.ReadSchema, schemaID, nil, 0)
 	if err != nil {
 		return fmt.Errorf("failed to convert schema to iceberg: %w", err)
 	}

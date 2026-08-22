@@ -34,26 +34,47 @@ import (
 var ErrUnsupportedIcebergType = errors.New("iceberg: unsupported type")
 
 // SchemaToIceberg converts a canonical model.Schema to an Iceberg TableSchema, assigning field IDs.
-func SchemaToIceberg(schema *model.Schema, schemaID int) (*TableSchema, int, error) {
+//
+// prevSchema and prevLastColumnID give this a stable identity to assign against (T69). Without
+// them, a field id was assigned purely by the field's position in schema.Fields, so a pure column
+// reorder -- which changes no data -- changed every field's id. A reader that maps a data file's
+// columns by id, which is the entire point of Iceberg field ids, then read the wrong column under
+// the right name: not a failure, a silently wrong answer.
+//
+// The rule: a field whose model.Field.FieldID is already a positive int keeps that id outright --
+// an explicit id from the source is authoritative. Otherwise, prevSchema is searched by the
+// field's dotted path (a struct field's ancestry, or "element"/"key"/"value" for the anonymous
+// nodes of a list or map); a name found there keeps its previous id. Only a field with no explicit
+// id and no match in prevSchema -- a genuinely new column -- is allocated a fresh id, starting
+// above prevLastColumnID.
+//
+// A column that is dropped and later re-added under the same name does *not* recover its old id:
+// prevSchema is the immediately preceding commit's schema, and a dropped column is absent from it,
+// so the re-added column is indistinguishable from a new one and gets a fresh id. This is
+// deliberate rather than an accident of the lookup: the data files written while the column was
+// absent carry no value for it, so resurrecting the old id would let a reader associate old
+// on-disk data with a column that in fact has none, or vice versa if a later file reuses the slot.
+// A fresh id makes the discontinuity visible instead of silently papering over it. Reusing the
+// dropped id for some unrelated new column is avoided the same way Iceberg's own last-column-id
+// is meant to: nextID starts at prevLastColumnID+1 regardless of what ids still appear in
+// prevSchema, so an id once assigned is never handed out again even after its field is gone.
+func SchemaToIceberg(schema *model.Schema, schemaID int, prevSchema *TableSchema, prevLastColumnID int) (*TableSchema, int, error) {
 	if schema == nil {
 		return nil, 0, fmt.Errorf("schema cannot be nil")
 	}
 
-	nextID := 1
+	prevIDs := fieldPathIDs(prevSchema)
+	nextID := prevLastColumnID + 1
+	if nextID < 1 {
+		nextID = 1
+	}
 	var nestedFields []*NestedField
 
 	for _, f := range schema.Fields {
-		fieldID := nextID
-		if f.FieldID != nil && *f.FieldID > 0 {
-			fieldID = *f.FieldID
-			if fieldID >= nextID {
-				nextID = fieldID + 1
-			}
-		} else {
-			nextID++
-		}
+		fieldID, updatedNextID := assignFieldID(f.FieldID, f.Name, prevIDs, nextID)
+		nextID = updatedNextID
 
-		icebergType, updatedNextID, err := convertTypeToIceberg(f.Schema, nextID)
+		icebergType, updatedNextID, err := convertTypeToIceberg(f.Schema, f.Name, prevIDs, nextID)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -74,6 +95,131 @@ func SchemaToIceberg(schema *model.Schema, schemaID int) (*TableSchema, int, err
 		SchemaID: schemaID,
 		Fields:   nestedFields,
 	}, lastColumnID, nil
+}
+
+// assignFieldID picks the id for one field: explicit (if the source supplied a positive id),
+// else whatever prevIDs already has on record for path, else the next unused id. It also returns
+// the nextID to use for whatever is assigned after it, bumped past the chosen id so ids stay
+// unique even when a reused id from explicit or prevIDs is higher than the running counter.
+func assignFieldID(explicit *int, path string, prevIDs map[string]int, nextID int) (int, int) {
+	if explicit != nil && *explicit > 0 {
+		id := *explicit
+		if id >= nextID {
+			nextID = id + 1
+		}
+		return id, nextID
+	}
+	if id, ok := prevIDs[path]; ok {
+		if id >= nextID {
+			nextID = id + 1
+		}
+		return id, nextID
+	}
+	id := nextID
+	nextID++
+	return id, nextID
+}
+
+// fieldPathIDs walks an Iceberg TableSchema and returns a map from each field's dotted path to the
+// id it was assigned. A list's element and a map's key/value use the specification's fixed names
+// for those anonymous nodes ("element", "key", "value"), mirroring nameMappingForType.
+//
+// It has to tolerate two different in-memory shapes for the same schema, because NestedField.Type
+// is `any`: a TableSchema this package just built (as SchemaToIceberg's own recursion does) holds a
+// struct's nested fields as []*NestedField and element/key/value ids as int, while one just decoded
+// from a metadata.json file (prevSchema, read back by the caller) holds the same data as
+// []interface{} of map[string]interface{} and ids as float64, because encoding/json has no static
+// type to decode an `any` field against. asFieldViews and asInt normalize both.
+func fieldPathIDs(schema *TableSchema) map[string]int {
+	out := make(map[string]int)
+	if schema == nil {
+		return out
+	}
+	collectFieldIDs(schema.Fields, "", out)
+	return out
+}
+
+func collectFieldIDs(rawFields any, prefix string, out map[string]int) {
+	for _, fv := range asFieldViews(rawFields) {
+		path := fv.name
+		if prefix != "" {
+			path = prefix + "." + fv.name
+		}
+		out[path] = fv.id
+		collectTypeIDs(fv.typ, path, out)
+	}
+}
+
+func collectTypeIDs(raw any, prefix string, out map[string]int) {
+	typed, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	switch typed["type"] {
+	case "struct":
+		collectFieldIDs(typed["fields"], prefix, out)
+	case "list":
+		elemPath := prefix + ".element"
+		if id, ok := asInt(typed["element-id"]); ok {
+			out[elemPath] = id
+		}
+		collectTypeIDs(typed["element"], elemPath, out)
+	case "map":
+		keyPath := prefix + ".key"
+		valPath := prefix + ".value"
+		if id, ok := asInt(typed["key-id"]); ok {
+			out[keyPath] = id
+		}
+		if id, ok := asInt(typed["value-id"]); ok {
+			out[valPath] = id
+		}
+		collectTypeIDs(typed["key"], keyPath, out)
+		collectTypeIDs(typed["value"], valPath, out)
+	}
+}
+
+// fieldView is the normalized shape asFieldViews reduces both in-process and JSON-decoded nested
+// fields to.
+type fieldView struct {
+	id   int
+	name string
+	typ  any
+}
+
+func asFieldViews(raw any) []fieldView {
+	switch v := raw.(type) {
+	case []*NestedField:
+		views := make([]fieldView, 0, len(v))
+		for _, f := range v {
+			views = append(views, fieldView{id: f.ID, name: f.Name, typ: f.Type})
+		}
+		return views
+	case []any:
+		views := make([]fieldView, 0, len(v))
+		for _, rf := range v {
+			m, ok := rf.(map[string]any)
+			if !ok {
+				continue
+			}
+			id, _ := asInt(m["id"])
+			name, _ := m["name"].(string)
+			views = append(views, fieldView{id: id, name: name, typ: m["type"]})
+		}
+		return views
+	default:
+		return nil
+	}
+}
+
+func asInt(raw any) (int, bool) {
+	switch v := raw.(type) {
+	case int:
+		return v, true
+	case float64:
+		return int(v), true
+	default:
+		return 0, false
+	}
 }
 
 // NameMappingProperty is the table property under which Iceberg records the fallback mapping from
@@ -153,7 +299,11 @@ func nameMappingNode(rawID any, name string, elementType any) nameMappingEntry {
 	return entry
 }
 
-func convertTypeToIceberg(s *model.Schema, nextID int) (any, int, error) {
+// convertTypeToIceberg converts one model.Schema node, allocating field ids for any nested
+// fields it introduces (a struct's members, a list's element, a map's key and value). path is the
+// dotted ancestry of s within the overall schema, used to look up a stable id for each nested node
+// in prevIDs -- see SchemaToIceberg's doc comment for the id-stability rule this implements.
+func convertTypeToIceberg(s *model.Schema, path string, prevIDs map[string]int, nextID int) (any, int, error) {
 	if s == nil {
 		return "string", nextID, nil
 	}
@@ -200,16 +350,13 @@ func convertTypeToIceberg(s *model.Schema, nextID int) (any, int, error) {
 	case model.TypeRecord:
 		var structFields []*NestedField
 		for _, cf := range s.Fields {
-			cfID := nextID
-			if cf.FieldID != nil && *cf.FieldID > 0 {
-				cfID = *cf.FieldID
-				if cfID >= nextID {
-					nextID = cfID + 1
-				}
-			} else {
-				nextID++
+			childPath := cf.Name
+			if path != "" {
+				childPath = path + "." + cf.Name
 			}
-			cType, uID, err := convertTypeToIceberg(cf.Schema, nextID)
+			cfID, updated := assignFieldID(cf.FieldID, childPath, prevIDs, nextID)
+			nextID = updated
+			cType, uID, err := convertTypeToIceberg(cf.Schema, childPath, prevIDs, nextID)
 			if err != nil {
 				return nil, nextID, err
 			}
@@ -227,9 +374,10 @@ func convertTypeToIceberg(s *model.Schema, nextID int) (any, int, error) {
 			"fields": structFields,
 		}, nextID, nil
 	case model.TypeList:
-		elemID := nextID
-		nextID++
-		elemType, uID, err := convertTypeToIceberg(s.ElementSchema.Schema, nextID)
+		elemPath := path + ".element"
+		elemID, updated := assignFieldID(nil, elemPath, prevIDs, nextID)
+		nextID = updated
+		elemType, uID, err := convertTypeToIceberg(s.ElementSchema.Schema, elemPath, prevIDs, nextID)
 		if err != nil {
 			return nil, nextID, err
 		}
@@ -241,17 +389,19 @@ func convertTypeToIceberg(s *model.Schema, nextID int) (any, int, error) {
 			"element-required": !s.ElementSchema.Schema.IsNullable,
 		}, nextID, nil
 	case model.TypeMap:
-		keyID := nextID
-		nextID++
-		keyType, uID1, err := convertTypeToIceberg(s.KeySchema.Schema, nextID)
+		keyPath := path + ".key"
+		keyID, updated := assignFieldID(nil, keyPath, prevIDs, nextID)
+		nextID = updated
+		keyType, uID1, err := convertTypeToIceberg(s.KeySchema.Schema, keyPath, prevIDs, nextID)
 		if err != nil {
 			return nil, nextID, err
 		}
 		nextID = uID1
 
-		valID := nextID
-		nextID++
-		valType, uID2, err := convertTypeToIceberg(s.ValueSchema.Schema, nextID)
+		valPath := path + ".value"
+		valID, updated2 := assignFieldID(nil, valPath, prevIDs, nextID)
+		nextID = updated2
+		valType, uID2, err := convertTypeToIceberg(s.ValueSchema.Schema, valPath, prevIDs, nextID)
 		if err != nil {
 			return nil, nextID, err
 		}

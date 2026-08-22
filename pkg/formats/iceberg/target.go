@@ -150,10 +150,25 @@ func (t *Target) CommitSnapshot(ctx context.Context, snapshot *model.Snapshot) e
 	}
 
 	// 1. Convert Schema
-	tableSchema, lastColID, err := SchemaToIceberg(snapshot.Table.ReadSchema, schemaID)
+	//
+	// prevSchema and prevLastColumnID feed SchemaToIceberg's stable field-id assignment (T69): a
+	// column that survives from the previous commit keeps the id an Iceberg consumer already
+	// associated with it, and new ids are allocated only above the previous high-water mark, so a
+	// dropped column's id is never handed to an unrelated later column.
+	var prevSchema *TableSchema
+	prevLastColumnID := 0
+	if prevMeta != nil {
+		prevSchema = schemaByID(prevMeta.Schemas, prevMeta.CurrentSchemaID)
+		prevLastColumnID = prevMeta.LastColumnID
+	}
+	tableSchema, lastColID, err := SchemaToIceberg(snapshot.Table.ReadSchema, schemaID, prevSchema, prevLastColumnID)
 	if err != nil {
 		return fmt.Errorf("failed to convert schema to iceberg: %w", err)
 	}
+	// Reused below for the synthetic partition column: a Hive-style partition column never
+	// appears in ReadSchema (see the comment at its allocation site), so SchemaToIceberg never
+	// sees it and cannot keep its id stable on its own -- that has to happen here instead.
+	prevIDs := fieldPathIDs(prevSchema)
 
 	// 2. Convert Partition Spec
 	// Initialised rather than declared nil: PartitionSpec.Fields carries no omitempty, and
@@ -182,8 +197,19 @@ func (t *Target) CommitSnapshot(ctx context.Context, snapshot *model.Snapshot) e
 			// column added here. Nothing is invented by doing so: an identity-partitioned column
 			// need not be stored in the data files at all, because a reader materializes it from
 			// the partition tuple in the manifest.
-			sourceID = lastColID + 1
-			icebergType, nextID, err := convertTypeToIceberg(pf.SourceField.Schema, sourceID+1)
+			//
+			// This branch runs on every commit for such a column, because it is never in
+			// ReadSchema for SchemaToIceberg to have already made stable (T69): without consulting
+			// prevIDs here too, the id kept incrementing by one on every single commit, with the
+			// partition spec's source-id drifting underneath a spec-id that never changed.
+			if prevID, ok := prevIDs[pf.SourceField.Name]; ok {
+				sourceID = prevID
+			} else {
+				sourceID = lastColID + 1
+			}
+			// This synthetic column is always primitive (checked immediately below), so it has no
+			// nested fields whose ids the path/prevIDs arguments would matter for.
+			icebergType, _, err := convertTypeToIceberg(pf.SourceField.Schema, pf.SourceField.Name, prevIDs, sourceID+1)
 			if err != nil {
 				return fmt.Errorf("failed to type the partition column %s: %w", pf.SourceField.Name, err)
 			}
@@ -191,7 +217,9 @@ func (t *Target) CommitSnapshot(ctx context.Context, snapshot *model.Snapshot) e
 				return fmt.Errorf("partition column %s has a nested type, which cannot be a "+
 					"partition source", pf.SourceField.Name)
 			}
-			lastColID = nextID - 1
+			if sourceID > lastColID {
+				lastColID = sourceID
+			}
 			tableSchema.Fields = append(tableSchema.Fields, &NestedField{
 				ID:       sourceID,
 				Name:     pf.SourceField.Name,
@@ -442,6 +470,23 @@ func applyFilesDiff(live []*model.DataFile, diff *model.FilesDiff) []*model.Data
 	}
 	result = append(result, diff.FilesAdded...)
 	return result
+}
+
+// schemaByID returns the schema in schemas whose SchemaID matches id, or the last entry if none
+// matches. CommitSnapshot always writes exactly one schema per metadata file -- Schemas is a
+// single-element literal a few lines above -- so in practice this is just "the one there is"; the
+// id lookup exists so a metadata file written by another engine, which may keep a longer schema
+// history, still resolves to the schema that was actually current.
+func schemaByID(schemas []*TableSchema, id int) *TableSchema {
+	for _, s := range schemas {
+		if s != nil && s.SchemaID == id {
+			return s
+		}
+	}
+	if len(schemas) > 0 {
+		return schemas[len(schemas)-1]
+	}
+	return nil
 }
 
 // Close is a no-op for Iceberg target.

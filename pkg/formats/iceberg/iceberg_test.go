@@ -41,7 +41,7 @@ func TestIceberg_SchemaRoundTrip(t *testing.T) {
 
 	origSchema := model.NewRecordSchema("products", []*model.Field{idField, nameField, priceField, createdField}, false)
 
-	icebergSchema, lastColID, err := iceberg.SchemaToIceberg(origSchema, 0)
+	icebergSchema, lastColID, err := iceberg.SchemaToIceberg(origSchema, 0, nil, 0)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, lastColID, 4)
 	require.Len(t, icebergSchema.Fields, 4)
