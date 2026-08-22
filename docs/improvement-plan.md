@@ -4134,17 +4134,44 @@ above `last-column-id`; a dropped and re-added column does not silently inherit 
 
 ---
 
-## T70 — Seven type-translation defects, six of them silent
+## T70 — Seven type-translation defects, six of them silent ⚠️ 2 OF 7 FIXED (items 1 and 6)
 
 Found by `test/torture_types_test.go` on 2026-08-22, whose fixtures put values on the boundaries
 where translation breaks rather than in the middle where it does not. Five of these are pinned by
 skipped tests rather than asserted as correct behaviour.
 
-**1. A struct column silently discards the entire statistics blob.** The headline defect.
-`StatsJSON.NullCount` is `map[string]int64` (`pkg/formats/delta`), but delta-rs legitimately nests a
-struct column's null count as a JSON *object*. `json.Unmarshal` fails, and `convertAddAction`'s
-`if err == nil` then drops **all** stats — `RecordCount` and every column's bounds, not just the
-struct's — with nothing surfaced. Any Delta table containing a struct loses its record counts.
+**1. A struct column silently discards the entire statistics blob. ✅ FIXED.** `StatsJSON.NullCount`
+was `map[string]int64` (`pkg/formats/delta`), but delta-rs legitimately nests a struct column's null
+count (and, less obviously, its min/max bounds too — same defect, present in `MinValues`/`MaxValues`
+as well even though their `map[string]any` type happened not to error) as a JSON *object*.
+`json.Unmarshal` failed, and `convertAddAction`'s `if err == nil` then dropped **all** stats —
+`RecordCount` and every column's bounds, not just the struct's — with nothing surfaced.
+
+Fixed by decoding into a new lenient `statsBlob` type (`minValues`/`maxValues`/`nullCount` as
+`map[string]any`) and flattening any nesting to dot-delimited column paths
+(`columnStatsFromFlatMaps` in `pkg/formats/delta/source.go`), the same convention
+`model.Schema.FieldByPath` and the Parquet/Iceberg column-stat readers already use. The path is built
+by recursing the schema structurally rather than read off `model.Field.Path()`: no schema builder in
+this codebase populates `Field.ParentPath`, so `Path()` returns only the leaf name for a nested field
+everywhere today — a separate, pre-existing gap, out of scope here.
+
+**The swallowed error is gone, not narrowed to a warning.** `convertAddAction` now returns
+`(*model.DataFile, error)`, threaded through `GetCurrentSnapshot` and `changeFromCommit`
+(`GetTableChangeForCommit`/`GetChangesSince`), so a stats blob that still fails to parse — genuinely
+malformed JSON, or a `nullCount` leaf that is not a number — fails the read and names the file, rather
+than being decoded loosely and returning a data file with silently-wrong statistics. RecordCount and
+every column's bounds come from the same blob, and no consumer should have to guess whether a zero
+RecordCount is real.
+
+Tests: `pkg/formats/delta/stats_nesting_test.go` (`TestDelta_NestedStructStatsFlatten`,
+`TestDelta_MalformedStatsSurfacesError`) and `test/torture_types_test.go`'s
+`TestTortureTypes_DeltaColumnBounds` against the real delta-rs-torture fixture — its
+`per_column_bounds_once_stats_parsing_is_fixed` subtest is unskipped, and its
+`decimal_bound_dropped_on_write` subtest under `TestTortureTypes_ConvertDeltaTortureIntoIceberg`
+(blocked on this same defect) is unskipped too, still passing because decimal bounds dropping on
+write is defect 4, separately open.
+
+**Commit:** `fix: parse nested Delta stats and recognize Hudi's own TIMESTAMP_NTZ logical type`
 
 **2. A null partition value is indistinguishable from an empty one.**
 `AddAction.PartitionValues` is `map[string]string`, so JSON `null` and `""` both decode to `""`.
@@ -4159,9 +4186,24 @@ case — the code comment already said so. Nothing is surfaced in the sync resul
 **5. An empty bound is indistinguishable from a missing one.** `DecodeBound` returns early on
 `len(raw) == 0`, so a genuinely empty string or bytes minimum is lost.
 
-**6. Hudi's writer and its own reader disagree.** The writer emits the Avro logical type
-`local-timestamp-micros` for `TIMESTAMP_NTZ`; its reader has no case for it and narrows to `STRING`.
-A self-inconsistent round trip, which is the one class a self-test *should* have caught.
+**6. Hudi's writer and its own reader disagree. ✅ FIXED.** The writer emitted the Avro logical type
+`local-timestamp-micros` for `TIMESTAMP_NTZ`; the reader (`parseAvroType`) had no case for it and
+narrowed to `STRING`, falling through to the function's default branch. A self-inconsistent round
+trip, which is the one class a self-test *should* have caught.
+
+Fixed by giving `parseAvroType` a `"local-timestamp-millis", "local-timestamp-micros"` case mapping
+to `model.TypeTimestampNTZ`. Both widths are accepted even though this package's writer only ever
+emits micros: Avro defines both as legitimate logical types, so a foreign writer's
+local-timestamp-millis column gets the same treatment rather than narrowing just because this
+writer picked one width. No other write-side logical type in `pkg/formats/hudi/schema.go` was
+missing a read-side case: `date`, `timestamp-millis`/`timestamp-micros`, `uuid` and `decimal` all
+already round-tripped.
+
+Test: `test/torture_types_test.go`'s `TestTortureTypes_ConvertDeltaTortureAcrossTargets/hudi`
+subtest, renamed from `timestamp_ntz_narrowed_to_string` (which pinned the defect) to
+`timestamp_ntz_round_trips` (which asserts `model.TypeTimestampNTZ`).
+
+**Commit:** see item 1's — landed in the same commit as this item.
 
 **7. Paimon narrows structures and zone-awareness.** `modelTypeToPaimonType` has no `TypeRecord`
 case; `parsePaimonType` cannot parse `ARRAY<` or `MAP<`, so it narrows on read even where the write
@@ -4178,9 +4220,9 @@ format-version 3, so nanosecond timestamps are untestable with it; delta-rs acce
 and silently truncates to microseconds.
 
 **Order to fix.** (1) first — it is silent loss of record counts on an ordinary schema. Then (6),
-because a format disagreeing with itself needs no foreign reader to be wrong. Then (2), which has an
-upstream issue to match against. (3), (4) and (5) are narrower and share the `DecodeBound` seam, so
-they are one change.
+because a format disagreeing with itself needs no foreign reader to be wrong. **Both done.** Then (2),
+which has an upstream issue to match against. (3), (4) and (5) are narrower and share the
+`DecodeBound` seam, so they are one change.
 
 **Acceptance:** each skipped test in `test/torture_types_test.go` is unskipped and passes, or is
 recorded here as a genuine format limitation with the reason.

@@ -323,7 +323,11 @@ func (s *Source) GetCurrentSnapshot(ctx context.Context) (*model.Snapshot, error
 
 	if cp := state.checkpoint; cp != nil {
 		for _, add := range cp.Adds {
-			activeFiles[add.Path] = s.convertAddAction(add, table)
+			dataFile, err := s.convertAddAction(add, table)
+			if err != nil {
+				return nil, err
+			}
+			activeFiles[add.Path] = dataFile
 		}
 	}
 
@@ -334,7 +338,10 @@ func (s *Source) GetCurrentSnapshot(ctx context.Context) (*model.Snapshot, error
 		}
 		for _, a := range commit.Actions {
 			if a.Add != nil {
-				dataFile := s.convertAddAction(a.Add, table)
+				dataFile, err := s.convertAddAction(a.Add, table)
+				if err != nil {
+					return nil, err
+				}
 				activeFiles[a.Add.Path] = dataFile
 			} else if a.Remove != nil {
 				delete(activeFiles, a.Remove.Path)
@@ -371,18 +378,22 @@ func (s *Source) GetTableChangeForCommit(ctx context.Context, commitID string) (
 		return nil, err
 	}
 
-	return s.changeFromCommit(commit, table), nil
+	return s.changeFromCommit(commit, table)
 }
 
 // changeFromCommit converts an already-parsed commit into a table change against the table as of
 // that commit, whose LatestCommitTime carries the commit's instant.
-func (s *Source) changeFromCommit(commit *DeltaCommit, table *model.Table) *model.TableChange {
+func (s *Source) changeFromCommit(commit *DeltaCommit, table *model.Table) (*model.TableChange, error) {
 	var added []*model.DataFile
 	var removed []*model.DataFile
 
 	for _, a := range commit.Actions {
 		if a.Add != nil {
-			added = append(added, s.convertAddAction(a.Add, table))
+			dataFile, err := s.convertAddAction(a.Add, table)
+			if err != nil {
+				return nil, err
+			}
+			added = append(added, dataFile)
 		}
 		if a.Remove != nil {
 			removed = append(removed, &model.DataFile{
@@ -399,7 +410,7 @@ func (s *Source) changeFromCommit(commit *DeltaCommit, table *model.Table) *mode
 		// The instant reported here is the derived one, not commitInfo's raw timestamp: the
 		// controller persists it and hands it back as the next sync's fromInstant.
 		CommitTime: table.LatestCommitTime,
-	}
+	}, nil
 }
 
 // GetChangesSince returns all sequential table changes since fromInstant.
@@ -453,7 +464,11 @@ func (s *Source) GetChangesSince(ctx context.Context, fromInstant int64) (*model
 		if table == nil {
 			return nil, fmt.Errorf("no metadata action found in delta log up to version %d", v)
 		}
-		changes = append(changes, s.changeFromCommit(commit, tableAsOf(table, commitTime)))
+		change, err := s.changeFromCommit(commit, tableAsOf(table, commitTime))
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, change)
 	}
 
 	if table == nil {
@@ -495,7 +510,14 @@ func (s *Source) Close() error {
 	return nil
 }
 
-func (s *Source) convertAddAction(add *AddAction, table *model.Table) *model.DataFile {
+// convertAddAction turns a Delta add action into a model.DataFile, including its statistics.
+//
+// A stats blob that fails to parse is reported rather than swallowed: RecordCount and every column's
+// bounds all come from the same JSON blob, and a caller acting on a silently-zeroed RecordCount for a
+// perfectly good data file is worse than a sync that fails loudly and names the file. The nested-struct
+// shape a real writer such as delta-rs emits (see statsBlob) is not an error case at all — it is decoded
+// and flattened — so this path is reached only by a genuinely malformed stats string.
+func (s *Source) convertAddAction(add *AddAction, table *model.Table) (*model.DataFile, error) {
 	dataFile := &model.DataFile{
 		PhysicalPath:  s.resolveDataPath(add.Path),
 		FileFormat:    model.FileFormatParquet,
@@ -517,22 +539,25 @@ func (s *Source) convertAddAction(add *AddAction, table *model.Table) *model.Dat
 
 	// Parse Stats JSON
 	if add.Stats != "" {
-		var stats StatsJSON
-		if err := json.Unmarshal([]byte(add.Stats), &stats); err == nil {
-			dataFile.RecordCount = stats.NumRecords
-			if table != nil && table.ReadSchema != nil {
-				for _, f := range table.ReadSchema.Fields {
-					colStat := &model.ColumnStat{Field: f}
-					if minVal, ok := stats.MinValues[f.Name]; ok {
-						maxVal := stats.MaxValues[f.Name]
-						colStat.Range = model.NewRange(minVal, maxVal)
-					}
-					if nc, ok := stats.NullCount[f.Name]; ok {
-						colStat.NumNulls = nc
-					}
-					dataFile.ColumnStats = append(dataFile.ColumnStats, colStat)
-				}
+		var stats statsBlob
+		if err := json.Unmarshal([]byte(add.Stats), &stats); err != nil {
+			return nil, fmt.Errorf("delta: parsing stats for %s: %w", add.Path, err)
+		}
+		dataFile.RecordCount = stats.NumRecords
+
+		if table != nil && table.ReadSchema != nil {
+			minValues := make(map[string]any)
+			maxValues := make(map[string]any)
+			nullCounts := make(map[string]any)
+			flattenStatsMap(stats.MinValues, "", minValues)
+			flattenStatsMap(stats.MaxValues, "", maxValues)
+			flattenStatsMap(stats.NullCount, "", nullCounts)
+
+			colStats, err := columnStatsFromFlatMaps(table.ReadSchema, "", minValues, maxValues, nullCounts)
+			if err != nil {
+				return nil, fmt.Errorf("delta: stats for %s: %w", add.Path, err)
 			}
+			dataFile.ColumnStats = colStats
 		}
 	}
 
@@ -548,7 +573,65 @@ func (s *Source) convertAddAction(add *AddAction, table *model.Table) *model.Dat
 		}
 	}
 
-	return dataFile
+	return dataFile, nil
+}
+
+// columnStatsFromFlatMaps walks schema's fields recursively, matching each one (by the same
+// dot-delimited path convention flattenStatsMap builds, "parent.child") against the flattened
+// minValues/maxValues/nullCounts maps, and returns one model.ColumnStat per field that has at
+// least one of the three.
+//
+// The path is built here, from the schema itself, rather than read off model.Field.Path(): no
+// schema builder in this package (or, per a repo-wide check, in any other format package) ever
+// populates Field.ParentPath, so Path() returns just the leaf name for a nested field everywhere in
+// this codebase today. Recursing structurally like this — the same technique
+// model.Schema.FieldByPath uses to walk a dotted path down into a schema, run in the opposite
+// direction — sidesteps that gap rather than depending on it being fixed first.
+func columnStatsFromFlatMaps(schema *model.Schema, prefix string, minValues, maxValues, nullCounts map[string]any) ([]*model.ColumnStat, error) {
+	if schema == nil {
+		return nil, nil
+	}
+
+	var stats []*model.ColumnStat
+	for _, f := range schema.Fields {
+		path := f.Name
+		if prefix != "" {
+			path = prefix + "." + f.Name
+		}
+
+		minVal, hasMin := minValues[path]
+		maxVal, hasMax := maxValues[path]
+
+		var numNulls int64
+		hasNulls := false
+		if raw, ok := nullCounts[path]; ok {
+			n, valid := int64FromStatsValue(raw)
+			if !valid {
+				return nil, fmt.Errorf("nullCount at %q is not a number (%T)", path, raw)
+			}
+			numNulls, hasNulls = n, true
+		}
+
+		if hasMin || hasMax || hasNulls {
+			colStat := &model.ColumnStat{Field: f}
+			if hasMin || hasMax {
+				colStat.Range = model.NewRange(minVal, maxVal)
+			}
+			if hasNulls {
+				colStat.NumNulls = numNulls
+			}
+			stats = append(stats, colStat)
+		}
+
+		if f.Schema != nil && f.Schema.DataType == model.TypeRecord {
+			nested, err := columnStatsFromFlatMaps(f.Schema, path, minValues, maxValues, nullCounts)
+			if err != nil {
+				return nil, err
+			}
+			stats = append(stats, nested...)
+		}
+	}
+	return stats, nil
 }
 
 func (s *Source) resolveDataPath(relPath string) string {
