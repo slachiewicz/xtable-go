@@ -347,6 +347,12 @@ func (t *Target) CommitSnapshot(ctx context.Context, snapshot *model.Snapshot) e
 		DefaultSpecID:      0,
 		PartitionSpecs:     []*PartitionSpec{partitionSpec},
 		LastPartitionID:    1000 + len(partitionFieldDefs),
+		// This target never sorts a data file it writes, so the only sort order it ever emits is
+		// the specification's reserved unsorted order (id 0). Fields is initialised rather than
+		// left nil for the same reason PartitionSpec.Fields is above: the struct tag carries no
+		// omitempty, and an empty-but-present array is what the specification requires, not null.
+		SortOrders:         []*SortOrder{{OrderID: 0, Fields: []*SortField{}}},
+		DefaultSortOrderID: 0,
 		Properties:         props,
 		CurrentSnapshotID:  &snapshotID,
 		Snapshots:          snapshots,

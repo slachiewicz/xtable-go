@@ -4380,7 +4380,7 @@ against what looked sufficient.
 
 ---
 
-## T72 — Iceberg metadata omits `sort-orders`, which v2 requires
+## T72 — Iceberg metadata omits `sort-orders`, which v2 requires ✅
 
 Also found by Trino, and the more interesting of the two because of *why* it survived.
 
@@ -4404,6 +4404,20 @@ tolerances. Record this next to the coverage matrix.
 
 **Acceptance:** `sort-orders` is written with at least the unsorted default (order id 0), Trino reads
 the table, and DuckDB still does.
+
+**Fixed.** `TableMetadata` (`pkg/formats/iceberg/metadata.go`) gains `SortOrder`/`SortField` types
+and a `sort-orders` field with no `omitempty` — v2 requires the key to exist, not merely be
+non-empty. `CommitSnapshot` (`pkg/formats/iceberg/target.go`) writes the reserved unsorted order
+(`order-id: 0`, `fields: []`, initialised rather than left `nil` so it marshals as `[]` and not
+`null`, the same reasoning as `PartitionSpec.Fields` a few lines above) and
+`default-sort-order-id: 0`, since this target never sorts a data file it writes. Manifest entries
+already carry an optional, nullable `sort_order_id` (`manifest.go`'s Avro schema, field-id 140) —
+the specification does not make it required, so no change was needed there.
+`go test -count=1 ./test/ -run TestDockertest_Trino` now passes the Iceberg subtest
+(`Iceberg_DeltaRsCheckpointToIceberg`) that this file's own package comment documented as an
+expected failure; the Hudi subtest's unrelated, already-tracked failure (T71) is untouched.
+`go test -count=1 ./test/ -run Equivalence` (DuckDB) still passes, confirming the fix does not trade
+one reader's tolerance for another's.
 
 **Commit:** `fix: write sort-orders in Iceberg metadata`
 
