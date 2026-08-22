@@ -27,17 +27,31 @@ import (
 
 // Property keys used in a Hudi table's .hoodie/hoodie.properties file.
 const (
-	PropTableName         = "hoodie.table.name"
-	PropTableType         = "hoodie.table.type"
-	PropTableVersion      = "hoodie.table.version"
-	PropBaseFileFormat    = "hoodie.table.base.file.format"
-	PropPartitionFields   = "hoodie.table.partition.fields"
-	PropRecordKeyFields   = "hoodie.table.recordkey.fields"
-	PropKeyGeneratorClass = "hoodie.table.keygenerator.class"
-	PropPrecombineField   = "hoodie.table.precombine.field"
-	PropChecksum          = "hoodie.table.checksum"
-	PropTableSchema       = "hoodie.table.schema"
+	PropTableName             = "hoodie.table.name"
+	PropTableType             = "hoodie.table.type"
+	PropTableVersion          = "hoodie.table.version"
+	PropBaseFileFormat        = "hoodie.table.base.file.format"
+	PropPartitionFields       = "hoodie.table.partition.fields"
+	PropRecordKeyFields       = "hoodie.table.recordkey.fields"
+	PropKeyGeneratorClass     = "hoodie.table.keygenerator.class"
+	PropPrecombineField       = "hoodie.table.precombine.field"
+	PropChecksum              = "hoodie.table.checksum"
+	PropTableSchema           = "hoodie.table.schema"
+	PropTimelineLayoutVersion = "hoodie.timeline.layout.version"
+	PropPopulateMetaFields    = "hoodie.populate.meta.fields"
 )
+
+// TimelineLayoutVersionV1 is the timeline layout version that corresponds to hoodie.table.version 6
+// and below (Hudi 0.x's classic .hoodie/-rooted timeline, no completion-time instant names). It is
+// org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion.LAYOUT_VERSION_1 in Hudi's
+// own source (hudi-common 1.2.0): HoodieTableVersion.SIX maps to it directly, and
+// HoodieTableMetaClient.TableBuilder#setTableVersion derives it from the table version the same way
+// Java XTable's HudiTableManager does (it pins HoodieTableVersion.SIX and never overrides the
+// layout). Layout version 2 (TimelineLayoutVersion.LAYOUT_VERSION_2) belongs to table version 8/9
+// (Hudi 1.x's LSM-tree timeline under .hoodie/timeline), which is the version range
+// MaxReadableTableVersion already refuses to read -- so a writer pinned to table version 6 must
+// never emit layout version 2.
+const TimelineLayoutVersionV1 = "1"
 
 // MaxReadableTableVersion is the newest hoodie.table.version this reader understands. Hudi 1.x
 // stamps version 8 or 9 and moves the timeline into .hoodie/timeline with completion-time instant

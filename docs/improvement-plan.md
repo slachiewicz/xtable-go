@@ -1865,7 +1865,7 @@ Iceberg→Hudi and Iceberg→Paimon now assert the plain file list every other t
 | ✅ Proven | T7, T10 → T17 — release workflow verified end to end by a throwaway tag |
 | 🧩 Landed under another number | T14 → T23 (`ListTables`, `DiscoverDatasets`) · T15 → `catalog.SyncPartitions` with `pkg/catalog/glue_partition.go`, wired at `pkg/conversion/controller.go:158`. Both are covered by tests against fakes, and **neither has been checked against a real Glue catalog** — which is what T15 asked for — so they are recorded here rather than as ✅ |
 | 📋 Unscheduled | T13 (HMS) — the roadmap's answer is to keep the explicit not-implemented refusal until a consumer with a concrete deployment appears |
-| 🎯 Open queue | T24, T30, T34, T37, T38, T39, T41–T44, T46–T50 from the roadmap, and T57, T61, T65 (v3 support), T69, T71, T72 |
+| 🎯 Open queue | T24, T30, T34, T37, T38, T39, T41–T44, T46–T50 from the roadmap, and T57, T61, T65 (v3 support), T69, T72, T73 |
 | ⚠️ Landed, unverified against the real service | T51 (Azure storage — green on the Azurite emulator, never run against Azure) · T52 (Entra ID auth — no Fabric workspace reached). Both name their unmet criteria in the task |
 
 **Picking up the queue.** T51 and T52 need an Azure subscription, not more work: the emulator lane
@@ -4352,29 +4352,112 @@ recorded here as a genuine format limitation with the reason.
 
 ---
 
-## T71 — Every Hudi table polytable writes is unreadable by any real Hudi reader
+## T71 — Every Hudi table polytable writes is unreadable by any real Hudi reader ⚠️ RECOGNITION FIXED, ROW COUNT STILL WRONG (SEE T73)
 
 Found by the Trino suite on 2026-08-22, the first foreign reader ever pointed at polytable's Hudi
 output.
 
-`pkg/formats/hudi/properties.go` never writes **`hoodie.timeline.layout.version`** into
+`pkg/formats/hudi/properties.go` never wrote **`hoodie.timeline.layout.version`** into
 `.hoodie/hoodie.properties`. Apache Hudi's own `HoodieTableMetaClient` — not anything
-Trino-specific — then throws:
+Trino-specific — then threw:
 
 ```
 TableNotFoundException: Table does not exist
 ```
 
-So the table is not merely degraded, it is **not recognised as a Hudi table at all**. Spark would
-refuse it identically. Every Hudi table this project has ever produced is in that state, and nothing
-noticed because until today no reader other than polytable had ever opened one.
+So the table was not merely degraded, it was **not recognised as a Hudi table at all**. Spark would
+have refused it identically. Every Hudi table this project had ever produced was in that state, and
+nothing noticed because until this suite existed no reader other than polytable had ever opened one.
 
 This is the cost of the empty cell recorded in `docs/interoperability-coverage.md`: Hudi had no
 independent reader, so its output was unverified rather than verified-and-fine.
 
-**Acceptance:** a converted Hudi table is recognised by a real Hudi reader; the Trino subtest passes;
-and `hoodie.properties` is checked against what `HoodieTableMetaClient` actually requires rather than
-against what looked sufficient.
+**Root cause, confirmed against Hudi 1.2.0 source** (`HoodieTableMetaClient.java:187-209`, the
+version Java XTable itself compiles against — `pom.xml`'s `hudi.version`): the constructor throws
+`TableNotFoundException` precisely when *both* an explicit layout-version argument and
+`hoodie.properties`'s own `hoodie.timeline.layout.version` are absent. It is not a validation of the
+property's value; it is the meta client's only proxy for "is this a Hudi table at all". A missing
+value is fatal; any parseable value it agrees to is not.
+
+**The value, and why 1.** `HoodieTableVersion.java` maps table version 6 (what this target already
+writes, matching Java XTable's own `HudiTableManager#initializeHudiTable` pin to
+`HoodieTableVersion.SIX`) directly to `TimelineLayoutVersion.LAYOUT_VERSION_1` — the classic 0.x
+timeline rooted at `.hoodie/` with no completion-time instant names. Layout version 2 belongs to
+table versions 8/9 (Hudi 1.x's LSM-tree timeline under `.hoodie/timeline`), the range
+`MaxReadableTableVersion` (T37) already refuses to read; a table-version-6 writer must never claim
+that layout. `HoodieTableMetaClient.TableBuilder#setTableVersion` derives the same pairing
+automatically when Java XTable calls it. Fixed by writing `hoodie.timeline.layout.version=1`
+unconditionally in `CommitSnapshot`, which also repairs a table written before this fix on its next
+sync (`TestHudi_CommitSnapshotRepairsExistingTableMissingLayoutVersion`).
+
+**A second gap found in the same audit:** `hoodie.populate.meta.fields` was never written either,
+so it defaulted to Hudi's own `true` — claiming `_hoodie_*` meta columns that polytable's data files,
+written by other formats' writers, do not have. Java XTable's target sets this to `false` explicitly
+for the same reason (`HudiTableManager`'s `setPopulateMetaFields(false)` call, with a comment naming
+it). Fixed alongside the layout version.
+
+**Full property diff against what `HudiTableManager.initializeHudiTable` + hudi-common 1.2.0's
+`HoodieTableMetaClient.TableBuilder` actually write for a table-version-6, `COPY_ON_WRITE` table**
+(read from the fetched Hudi 1.2.0 source, not recalled): every key below this project already wrote
+correctly (`hoodie.table.name`, `hoodie.table.type`, `hoodie.table.version=6`,
+`hoodie.table.base.file.format=PARQUET`, `hoodie.table.partition.fields`), the two keys this task
+adds, and what remains a **documented, not-fixed** gap, each with its reason for staying open:
+
+- `hoodie.database.name` — Java XTable always sets one (`default_hudi` when no target namespace is
+  given, `HudiTableManager.DEFAULT_DATABASE_NAME`). Not fixed: polytable's `Target` has no per-sync
+  namespace input to source this from (the same open question T49 already tracks for catalog
+  identifiers generally); adding a hardcoded constant would invent a namespacing decision, not close
+  one.
+- `hoodie.table.recordkey.fields` — Java always writes this key, even as an empty string, from
+  `table.getReadSchema().getRecordKeyFields()`. Not fixed here: `model.Schema.RecordKeyFields` exists
+  but `CommitSnapshot` never reads it; wiring it through is straightforward but untested by this
+  task's fixture (`delta-rs-compaction` declares no record key), so it is left for whichever task next
+  touches key-field propagation rather than added speculatively.
+- `hoodie.table.keygenerator.class` / `.type` — **investigated and deliberately not added.** Reading
+  hudi-common 1.2.0's `TableBuilder.build()` line by line: for a table version below `NINE`,
+  `setKeyGeneratorClassProp` maps the class name through `KeyGeneratorType.fromClassName` and writes
+  `hoodie.table.keygenerator.type` (e.g. `NON_PARTITIONED`), only writing the deprecated
+  `hoodie.table.keygenerator.class` key when the class doesn't match a known standard type
+  (`USER_PROVIDED`). Java XTable's `getKeyGeneratorClass` only ever returns standard Hudi classes
+  (`NonpartitionedKeyGenerator`, `SimpleKeyGenerator`, `ComplexKeyGenerator`,
+  `TimestampBasedKeyGenerator`, `CustomKeyGenerator`), so a real Java-XTable-produced table-version-6
+  table has `.type`, not `.class`. Writing `.class` from Go, as `PropKeyGeneratorClass`'s existing
+  (already-declared, never-set) constant would suggest, would **diverge** from what Java actually
+  produces rather than match it — left unset rather than guessed wrong.
+- `hoodie.table.checksum` — confirmed write-path-only in hudi-common 1.2.0: `HoodieTableConfig`'s read
+  constructor calls `fetchConfigs`, which does no checksum validation; `validateChecksum` is only
+  invoked from the write/modify path (`storeProperties`, `modify`). A missing checksum cannot be why
+  `TableNotFoundException` fired, and does not block Trino's read either. Left unset.
+- `hoodie.archivelog.folder=archived`, `hoodie.timeline.path=timeline`,
+  `hoodie.timeline.history.path=history`, `hoodie.table.timeline.timezone=UTC` — `TableBuilder.build()`
+  always sets these (explicit value or its own default) and none carries a `sinceVersion` tag, so
+  `dropInvalidConfigs` keeps them even on a table-version-6 table. Left unset: they are the 1.x
+  LSM-timeline path knobs and UTC-vs-local commit clock, neither of which this target's classic
+  layout-version-1 timeline reader (`pkg/formats/hudi/source.go`, `.hoodie/`-rooted, no completion
+  time) or Trino's connector needs to locate this table's `.commit` files.
+- `hoodie.table.initial.version` — confirmed **absent** even from Java's own output:
+  `INITIAL_VERSION` carries `sinceVersion("1.0.0")` and is not in
+  `CONFIGS_REQUIRED_FOR_OLDER_VERSIONED_TABLES`, so `dropInvalidConfigs` strips it from a
+  table-version-6 table. Correctly never written by polytable either.
+- the pre-`NINE` merge-mode trio `hoodie.record.merge.mode` / `hoodie.compaction.payload.class` /
+  `hoodie.record.merge.strategy.id`, inferred by `inferMergingConfigsForPreV9Table` — not
+  investigated in this pass; flagged here rather than silently matched, in case a follow-up finds a
+  reader that needs one of them for something past a bare row count.
+
+**Verified against the real oracle, not just a unit test:** `go test -count=1 ./test/ -run
+TestDockertest_Trino` now gets *past* `TableNotFoundException` entirely — the Hudi subtest's
+`t.Fatalf` branch (which fires only on a Trino query error) does not fire. The subtest still fails,
+on a **different, newly discovered defect**: Trino's `count(*)` returns `0` against the fixture
+manifest's ground truth of `8`, with no error at all. That is real progress on this task's own
+acceptance criterion — "recognised as a Hudi table" is fixed and oracle-confirmed — but "the Trino
+subtest passes" is not yet true. The new defect is registered as **T73** rather than folded into this
+one, since it is a different failure mode (silently empty vs. refused-outright) with a different
+likely cause (base-file naming, not `hoodie.properties` content) and needs its own investigation.
+
+**Acceptance:** a converted Hudi table is recognised by a real Hudi reader (✅, oracle-confirmed); the
+Trino subtest passes (❌, blocked on T73); and `hoodie.properties` is checked against what
+`HoodieTableMetaClient` actually requires rather than against what looked sufficient (✅, see the
+property diff above).
 
 **Commit:** `fix: write hoodie.timeline.layout.version so Hudi readers recognise the table`
 
@@ -4406,6 +4489,41 @@ tolerances. Record this next to the coverage matrix.
 the table, and DuckDB still does.
 
 **Commit:** `fix: write sort-orders in Iceberg metadata`
+
+---
+
+## T73 — Trino's Hudi connector reads zero rows from a table it now recognises
+
+Found finishing T71: once `hoodie.timeline.layout.version` is written, Trino's Hudi connector no
+longer throws `TableNotFoundException`, but `SELECT count(*)` against the converted
+`delta-rs-compaction` fixture returns `0` against a ground-truth manifest of `8`, with no query error
+at all — a silent empty read, not a refusal.
+
+**Not yet root-caused with the same rigor T71 used** (no primary-source Trino confirmation was
+fetched for this one — see the honesty note below), but the leading hypothesis, and the reason it is
+plausible: `pkg/formats/hudi/timeline.go`'s own `FileGroupID` doc comment already states Hudi's base
+file naming convention, `<fileId>_<writeToken>_<instantTime>.parquet`, and `Target.CommitSnapshot`
+(`pkg/formats/hudi/target.go`) never renames or copies a data file to that convention — it writes the
+write stat's `Path` as the *relativized original physical path* from whichever source format produced
+it (e.g. delta-rs's own file names for this fixture). polytable's own `Source` tolerates this because
+it reads file membership from the commit metadata's write stats directly rather than deriving it from
+the filename (which is why `TestHudi_SnapshotCommitAndRead` passes). A real Hudi reader that builds
+its `FileSystemView` from a partition-directory listing, parsing `fileId`/`instantTime` out of the
+filename itself (as Hudi's own `FSUtils` does), would recognise zero files under that view — matching
+the observed `0` exactly, with no error, since "no files found" is a valid, non-exceptional result of
+that scan. This has not been confirmed by reading Trino's Hudi connector source or its container
+logs; it is the mechanism that best fits the observed symptom, not a proven cause.
+
+**Why this was not fixed under T71.** It is a different failure mode (silent zero rows vs. an
+outright refusal) with a different, larger fix shape: `CommitSnapshot` would need to place — copy or
+rename, decide which — every data file under a Hudi-convention name, which changes on-disk layout
+behavior for every existing Hudi table this project writes, not just add a missing property. That is
+a properly-scoped task of its own, not a same-commit addendum.
+
+**Acceptance:** `go test -count=1 ./test/ -run TestDockertest_Trino`'s `Hudi_DeltaRsCompactionToHudi`
+subtest passes, with `count(*)` matching the fixture manifest's row count; the actual root cause is
+confirmed by reading Trino's Hudi connector source (or, failing that, its container logs from a
+run with the subtest's Docker containers kept alive) rather than assumed from symptom-fit alone.
 
 ---
 

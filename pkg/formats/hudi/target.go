@@ -212,6 +212,20 @@ func (t *Target) CommitSnapshot(ctx context.Context, snapshot *model.Snapshot) e
 	props.Set(PropTableName, snapshot.Table.Name)
 	props.Set(PropTableType, "COPY_ON_WRITE")
 	props.Set(PropTableVersion, "6")
+	// hoodie.table.version 6 is Hudi's HoodieTableVersion.SIX, which Hudi's own
+	// HoodieTableMetaClient.TableBuilder#setTableVersion always pairs with timeline layout version 1
+	// (see TimelineLayoutVersionV1's comment). Without this key, HoodieTableMetaClient's constructor
+	// throws TableNotFoundException("Table does not exist") the moment neither the caller nor
+	// hoodie.properties supplies a layout version (HoodieTableMetaClient.java:202-209 in hudi-common
+	// 1.2.0) -- it is not a validation of this property's value, it is the meta client's only proxy
+	// for "is this actually a Hudi table". T71.
+	props.Set(PropTimelineLayoutVersion, TimelineLayoutVersionV1)
+	// polytable's data files are foreign Parquet written by another format's writer, so they carry
+	// none of Hudi's _hoodie_* meta columns. hoodie.populate.meta.fields defaults to true in Hudi
+	// itself, which would tell a reader to expect those columns; Java XTable's HudiConversionTarget
+	// sets this to false for the same reason (HudiTableManager#initializeHudiTable's
+	// setPopulateMetaFields(false) call).
+	props.Set(PropPopulateMetaFields, "false")
 	props.Set(PropBaseFileFormat, "PARQUET")
 	if len(partFieldNames) > 0 {
 		props.Set(PropPartitionFields, strings.Join(partFieldNames, ","))
