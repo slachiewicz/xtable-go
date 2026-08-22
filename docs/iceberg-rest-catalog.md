@@ -109,7 +109,12 @@ usual. Explicitly set dataset fields win over resolved ones.
   (`https://<workspace-host>/api/2.1/unity-catalog/iceberg`) with a Databricks
   token in `properties.token`.
 - Nessie: the Iceberg REST endpoint is served under `/iceberg` on the Nessie
-  server, for example `http://localhost:19120/iceberg`.
+  server, for example `http://localhost:19120/iceberg`. Pull the image from
+  `ghcr.io/projectnessie/nessie` or `quay.io/projectnessie/nessie`, not from
+  Docker Hub: Nessie has moved off `docker.io`, and the image still there is old
+  enough to predate the Iceberg REST module entirely, so every Iceberg path on
+  it returns 404. Nessie also returns its prefix under `defaults` rather than
+  `overrides` — see T58.
 - Microsoft OneLake and Fabric: the endpoint is
   `https://onelake.table.fabric.microsoft.com/iceberg`. Set `auth: entra` and a
   `warehouse` property of `<WorkspaceID>/<DataItemID>`; `databaseName` is the

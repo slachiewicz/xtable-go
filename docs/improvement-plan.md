@@ -3258,7 +3258,8 @@ owed.
 
 **Correction to T53's record.** Its outcome says Nessie returns an empty prefix. That is true only of
 the stale `docker.io/projectnessie/nessie` image (0.76.6), which has no Iceberg REST module at all
-and 404s every Iceberg path. Nessie's releases moved to `ghcr.io/projectnessie/nessie`, and the
+and 404s every Iceberg path. Nessie has moved off Docker Hub to `ghcr.io/projectnessie/nessie`
+and `quay.io/projectnessie/nessie`, and the
 current server returns a non-empty prefix under `defaults`.
 
 **Commit:** `fix: read the Iceberg REST prefix from defaults and stop escaping it`
