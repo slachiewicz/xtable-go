@@ -1573,6 +1573,90 @@ retention) is what this suite must match or exceed, not just the happy-path inse
 cover the read/write halves with delta-rs, pyiceberg and DuckDB; the scenario dimension is
 still mostly open.
 
+### Manual JVM interop check, 2026-08-22 — the nightly job is still unbuilt, but both directions were run once by hand
+
+The Apache XTable checkout at `../incubator-xtable` (HEAD `16778bb`) was built once to answer the
+question T60 could only answer for one direction. Build: `JAVA_HOME` pointed at Temurin 11,
+`mvn package -pl xtable-utilities -am -DskipTests` from the repo root, 105s wall time. Disk was 20GiB
+free before the build and 19GiB free after (the bundled jar is 420MB, not the ~1.1GB estimated — this
+pom trims more than expected — and `~/.m2` is 1.2GB, not 5.4GB; both numbers were smaller than
+briefed, not a problem). The jar was deleted after this session's testing finished, since it "will
+not survive" per the task brief; disk ended at 18GiB free with it gone (other processes' normal
+churn, not this task). No `original-*.jar` was left; nothing in `../incubator-xtable` was committed,
+branched, or reset.
+
+**Java → polytable: verified, and now a committed regression test.** Ran the jar's `RunSync` against
+`test/testdata/fixtures/delta-rs/sales` (`sourceFormat: DELTA`, `targetFormats: [ICEBERG]`), producing
+a real `v1`/`v2`/`v3.metadata.json`, `version-hint.text`, and Avro manifests with Java's
+`XTABLE_METADATA` property. Running `polytable sync` against the same source and that same Iceberg
+target reported `"verdict": "NO_OP"` with `lastInstantSynced` unchanged, and the `metadata/` directory
+was byte-for-byte unchanged afterward (no `v4.metadata.json`, `version-hint.text` still `3`) — this is
+the observable-state check the task asked for, not a log-text one. That exact table, with its
+absolute paths relocated the same way `relocateAvroManifests` relocates the pyiceberg fixtures, is
+committed at `test/testdata/fixtures/java-xtable-delta-to-iceberg/sales` and exercised by
+`TestT30_PolytableRecognizesJavaSyncState_NoOp` in `test/t30_java_interop_test.go` — no JVM is needed
+to run it, only to have produced it once. This closes T60's "not verified" gap for this direction with
+a fixture instead of the live Azure copy T60 relied on.
+
+**A prerequisite defect, found before Direction 2 could even start: the bundled jar cannot read any
+Delta table.** `xtable-utilities/pom.xml`'s `maven-shade-plugin` configuration has no
+`ServicesResourceTransformer`. Both `spark-core` and `delta-core_2.12:2.4.0` ship a
+`META-INF/services/org.apache.spark.sql.sources.DataSourceRegister` file; shading without a merging
+transformer keeps only the first one it packs and silently drops the other, and in this build that
+was Delta's `org.apache.spark.sql.delta.sources.DeltaDataSource` line — `DeltaTable.forPath` then
+fails with `SparkClassNotFoundException: Failed to find the data source: delta`. Confirmed by
+inspecting the packed jar directly (`unzip -p ... META-INF/services/...DataSourceRegister` has 12
+Spark-builtin lines and no Delta one). **This was found in a jar built locally from this exact pom
+section; it was not checked against a published Apache release artifact**, so it may or may not
+reach users of the official binary. Worked around it *only* for this local test session by unzipping
+the jar, appending the missing service line, and rezipping — not a change to either repository, and
+not something to build on: report it upstream rather than carrying the patch forward here.
+
+**polytable → Java: blocked by T72, confirmed against Java's own embedded Iceberg library — a second,
+independent confirmation beyond Trino's.** Synced the same Delta source with polytable
+(`verdict: SUCCESS`, writing `XTABLE_METADATA` and `xtable_last_instant_synced` side by side, per
+T60), then pointed the patched jar at that Iceberg output. It never got as far as reading sync state:
+
+```
+java.lang.IllegalArgumentException: sort-orders must exist in format v2
+	at org.apache.iceberg.TableMetadataParser.fromJson(TableMetadataParser.java:445)
+	at org.apache.iceberg.hadoop.HadoopTableOperations.refresh(HadoopTableOperations.java:121)
+	at org.apache.xtable.iceberg.IcebergTableManager.tableExists(IcebergTableManager.java:64)
+```
+
+Iceberg's own parser — the library XTable embeds, not a downstream consumer's stricter reader —
+refuses `TableMetadataParser.fromJson` outright. T72 is not a Trino-specific pickiness; it is a hard
+blocker for Java accepting a polytable-written table at all.
+
+**Isolating T72 from the XTABLE_METADATA question.** Patched only `sort-orders` (a bare
+`[{"order-id": 0, "fields": []}]`, test-only, into a copy of polytable's output — not a code change)
+to see whether Java would read the sync state once that parser error was out of the way. It did:
+
+```
+INFO  ConversionController - Incremental sync is not safe from instant Optional[2026-08-21T14:54:10.442Z].
+      Falling back to snapshot sync.
+```
+
+`2026-08-21T14:54:10.442Z` is exactly the `lastInstantSynced` polytable wrote into `XTABLE_METADATA`
+— Java parsed it correctly. It still chose a full resync rather than true incremental, but the cause
+traces to `DeltaHistoryManager`, not to metadata recognition: it logged
+`Found Delta commit 0 with a timestamp ... greater than the next commit timestamp` because every
+`_delta_log/*.json` file in a `git`-checked-out fixture shares one mtime, and Delta's
+commit-to-timestamp lookup falls back to file mtime when `commitInfo.timestamp` isn't
+monotonic-with-mtime. That is an artifact of testing against a `git checkout`, not a defect in either
+tool's sync-state handling — but it means "Java accepts polytable's `XTABLE_METADATA` and does a true
+incremental sync" is confirmed only for metadata recognition, not yet for the full round trip. Control,
+run to make sure "unchanged observable state" is a meaningful check given Java has no `NO_OP` status
+code: running the unpatched jar twice against its own Delta→Iceberg output left `metadata/` completely
+untouched the second time (same file set, same mtimes) — the methodology works.
+
+**Net for T30:** Direction 1 is verified and pinned by a committed, JVM-free test. Direction 2's
+metadata-recognition half is verified manually (Java reads `XTABLE_METADATA` correctly); its
+full-round-trip half needs T72 fixed and a Delta fixture with real, increasing commit mtimes (a
+fresh delta-rs write, not a git checkout) to retest without the timestamp confound. The nightly
+`workflow_dispatch` job itself — the actual deliverable this task originally scoped — was not built;
+this was a one-off manual run answering the specific question T60 left open.
+
 ## T31 — Iceberg manifests must be Avro, not JSON ✅
 
 **The largest interop defect in the port**, found 2026-08-21 while planning engine verification.
@@ -3489,9 +3573,17 @@ end-to-end case — one Delta commit synced to Iceberg, its target metadata then
 only `XTABLE_METADATA` (no flat keys at all) — reports `NO_OP` on the next sync
 (`TestController_RecognizesJavaOnlyShapedSyncState`, `pkg/conversion/t60_test.go`).
 
-**Not verified: the reverse direction.** Java recognizing a polytable-synced table still needs the
-JVM lane in T30; this task only confirmed polytable reads Java's shape, and that Java's own round
-trip on its own tables works (a third sync of an unchanged source produced no new metadata version).
+**The reverse direction, updated 2026-08-22 by T30's manual JVM run:** Java's own embedded Iceberg
+library refuses a polytable-written table outright on the unrelated T72 defect (`sort-orders must
+exist in format v2`) before it ever reads `XTABLE_METADATA` — a second, independent confirmation of
+T72 beyond Trino's. Working around T72 on a copy of the output (test-only, not a code change) showed
+Java *does* parse polytable's `XTABLE_METADATA` correctly — its log echoed back the exact
+`lastInstantSynced` instant polytable wrote — but it still fell back to a full snapshot sync rather
+than a true incremental, traced to `DeltaHistoryManager`'s timestamp-based commit lookup being
+unreliable against a `git`-checked-out Delta fixture (uniform mtimes), not to a metadata-recognition
+fault. So: Java reading polytable's write shape is confirmed; a true end-to-end incremental round
+trip needs T72 fixed and a fixture with real commit mtimes to confirm without that confound. Details
+and the exact commands are under T30.
 
 ---
 
